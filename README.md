@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-339933.svg)](package.json)
 
-[✨ 特性](#特性) · [📦 安装](#安装) · [🤖 在 agent 里用](#在-agent-里用) · [🛠️ 工具](#工具) · [🔐 认证与指纹](#认证与主机指纹) · [🛡️ 安全边界](#安全边界) · [🧑‍💻 开发](#开发)
+[✨ 特性](#-特性) · [📦 安装](#-安装) · [🤖 在 agent 里用](#-在-agent-里用) · [🖥️ 页面](#-页面) · [🛠️ 工具](#-工具) · [🔐 认证与指纹](#-认证与主机指纹) · [🛡️ 安全边界](#-安全边界) · [🧑‍💻 开发](#-开发)
 
 </div>
 
