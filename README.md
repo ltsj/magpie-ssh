@@ -1,6 +1,6 @@
 <div align="center">
 
-# magpie-ssh
+# 🪶 magpie-ssh
 
 **在 magpie 侧边栏里维护 SSH 主机表，把这张表交给每个 agent 用**
 
@@ -10,13 +10,13 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-339933.svg)](package.json)
 
-[安装](#安装) · [在-agent-里用](#在-agent-里用) · [工具](#工具) · [认证与指纹](#认证与主机指纹) · [安全边界](#安全边界) · [开发](#开发)
+[✨ 特性](#特性) · [📦 安装](#安装) · [🤖 在 agent 里用](#在-agent-里用) · [🛠️ 工具](#工具) · [🔐 认证与指纹](#认证与主机指纹) · [🛡️ 安全边界](#安全边界) · [🧑‍💻 开发](#开发)
 
 </div>
 
 ---
 
-## 特性
+## ✨ 特性
 
 - **一份主机表，所有 agent 共用** — 插件注册 `hosts`、`check`、`run`、`put`、`get` 五个工具，magpie 把它们汇成自己的 MCP 服务器，omp / codex / pi / dsh / workbuddy 装好即用。
 - **纯 JS 的 SSH** — 只依赖 `ssh2`，不调用系统 ssh，没有原生构建，Node ≥18 或 magpie 自带的 Bun 都能跑。
@@ -30,7 +30,7 @@
 
 ---
 
-## 安装
+## 📦 安装
 
 ```bash
 magpie plugin add "github:ltsj/magpie-ssh"   # 从仓库装，自动装依赖
@@ -44,7 +44,7 @@ magpie plugin update magpie-ssh             # 以后升级
 
 文件夹装的插件不在 magpie 的 `plugins/` 项目里，`ssh2` 得装在插件自己的 `node_modules`。目前还没发到 npm。
 
-## 在 agent 里用
+## 🤖 在 agent 里用
 
 magpie 会把每个插件的工具作为独立 MCP 服务器写进各 agent 的配置：
 
@@ -58,7 +58,7 @@ http://127.0.0.1:3425/mcp/magpie/tools/magpie-ssh
 claude mcp add --transport http magpie-ssh http://127.0.0.1:3425/mcp/magpie/tools/magpie-ssh
 ```
 
-## 页面
+## 🖥️ 页面
 
 侧边栏「插件」分组里的 **SSH 主机**：名称、主机、端口、用户、密码、私钥路径与口令、主机指纹校验、备注；行内可编辑，删除要点两次。
 
@@ -68,7 +68,7 @@ claude mcp add --transport http magpie-ssh http://127.0.0.1:3425/mcp/magpie/tool
 
 ---
 
-## 工具
+## 🛠️ 工具
 
 下表用的是 magpie 汇总地址里的名字；agent 自己的服务器里去掉 `magpie-ssh_` 前缀。
 
@@ -116,11 +116,11 @@ magpie 给每个工具 55 秒，插件自己留出余量：
 
 ---
 
-## 认证与主机指纹
+## 🔐 认证与主机指纹
 
 ### 三种认证
 
-主机记录里 `password`、`identityFile` 按顺序取第一个配了的，都没有就用 ssh agent（`SSH_AUTH_SOCK`，Windows 上默认管道 `\\.\pipe\openssh-ssh-agent`）。
+主机记录里 `password`、`identityFile` 按顺序取第一个配了的，都没有就用 ssh agent（`SSH_AUTH_SOCK`，Windows 上默认管道 `\\\\.\\pipe\\openssh-ssh-agent`）。
 
 `identityFile` 和 `put`/`get` 的 `local` 里 `~` 会展开；`put`/`get` 的远端路径写 `~` 或 `~/x` 会按远端 home 展开（SFTP 自己不做这件事），和 `run` 里 `~` 由远端 shell 展开的效果一致。私钥必须是个小于 1 MB 的普通文件——指向 `/dev/zero` 之类会在宿主事件循环上同步卡死，所以直接拒。
 
@@ -140,7 +140,7 @@ magpie 给每个工具 55 秒，插件自己留出余量：
 
 ---
 
-## 已知限制
+## ⚠️ 已知限制
 
 - **不读 `~/.ssh/config`** — 别名、`ProxyJump` 跳板机、`LocalForward` 都不会生效，主机字段得自己填全。
 - **不支持 keyboard-interactive** — 登录时还要再输一次验证码/密码的服务器连不上（`ssh2` 的 `tryKeyboard` 没开）。
@@ -149,7 +149,7 @@ magpie 给每个工具 55 秒，插件自己留出余量：
 
 ---
 
-## 安全边界
+## 🛡️ 安全边界
 
 - 密码、私钥口令都是以**明文**存在 `~/.config/magpie/plugins.json` 里的（magpie 的 `plugin-auth.json` 也这样）。不想明文就改用 agent，把密码和口令字段留空；导出主机表得到的 JSON 里同样是明文。
 - agent 一旦能用这些主机，就能以你的身份在那些机器上执行任意命令。别把 root 主机随手加进来。
@@ -160,7 +160,7 @@ magpie 给每个工具 55 秒，插件自己留出余量：
 
 ---
 
-## 目录结构
+## 📁 目录结构
 
 ```text
 .
@@ -182,7 +182,7 @@ magpie 给每个工具 55 秒，插件自己留出余量：
 
 ---
 
-## 开发
+## 🧑‍💻 开发
 
 ```bash
 pnpm install
@@ -199,6 +199,6 @@ node test/smoke.mjs        # 或者 pnpm test
 
 CI 在 push 到 `master` 和 PR 时跑：`pnpm install --frozen-lockfile`、`node test/smoke.mjs`、`npm pack --dry-run`，平台是 ubuntu 和 windows、Node 18/20/22 六个组合——`engines` 说 >= 18，代码里也有 Windows 专属分支（ssh-agent 的命名管道、路径大小写折叠），只跑一个组合等于没测。改完 `magpie plugin update magpie-ssh`（Git 装法）才会生效到正在跑的 magpie。
 
-## 许可
+## 📄 许可
 
 MIT
