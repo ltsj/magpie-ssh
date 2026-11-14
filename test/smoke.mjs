@@ -212,6 +212,7 @@ assert.equal(remotePath("~/a", "/home/pi/"), "/home/pi/a");
 assert.equal(remotePath("/etc/passwd", "/home/pi"), "/etc/passwd");
 assert.equal(remotePath("rel.txt", "/home/pi"), "rel.txt");
 assert.equal(remotePath("~/a", null), "~/a");
+assert.equal(remotePath("~", "/home/pi"), "/home/pi");
 
 // 找主机：按名称、按主机名；找不到时给出原因
 assert.equal(pickHost([host], "prod").host.id, "a1");

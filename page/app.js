@@ -130,6 +130,7 @@ function render() {
 				return;
 			}
 			armedDelete = null;
+			if (editingId === host.id) stopEditing();
 			if (await persist(hosts.filter((item) => item.id !== host.id)))
 				flash("已删除");
 		});
@@ -158,7 +159,9 @@ $("form").addEventListener("submit", async (event) => {
 			item.id !== editingId,
 	);
 	if (duplicate) return flash("这个名称已经有了", true);
-	const next = editingId
+	// 编辑的那个可能刚被删掉：那就当新增，别假装保存成功
+	const target = editingId && hosts.some((item) => item.id === editingId);
+	const next = target
 		? hosts.map((item) =>
 				item.id === editingId ? { ...draft, id: editingId } : item,
 			)
@@ -166,7 +169,7 @@ $("form").addEventListener("submit", async (event) => {
 	$("submit").disabled = true;
 	try {
 		if (await persist(next)) {
-			flash(editingId ? "已保存" : "已添加");
+			flash(target ? "已保存" : "已添加");
 			stopEditing();
 		}
 	} finally {

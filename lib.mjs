@@ -485,9 +485,14 @@ export async function transferRemote(
 				else resolve(handle);
 			});
 		});
+		// realpath 也要算进预算：它挂在同一条连接上，卡住照样要放手
 		const home = await new Promise((resolve) => {
-			if (!String(remote).startsWith("~/")) return resolve(null);
-			sftp.realpath(".", (err, dir) => resolve(err ? null : dir));
+			if (!String(remote).startsWith("~")) return resolve(null);
+			const timer = setTimeout(() => resolve(null), left());
+			sftp.realpath(".", (err, dir) => {
+				clearTimeout(timer);
+				resolve(err ? null : dir);
+			});
 		});
 		const path = remotePath(remote, home);
 		return await new Promise((resolve) => {
