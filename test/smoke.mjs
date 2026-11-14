@@ -191,4 +191,10 @@ assert.match(
 	/^exit 0\n\[note\]\nx$/,
 );
 assert.match(render({ code: 0, stdout: "abcdef", stderr: "e" }, 3), /截断/);
+// "exit 0\na" 共 8 字符，第 9 个正好是 emoji 的高位代理：不能切出半个字符
+const split = render({ code: 0, stdout: "a\u{1F600}b", stderr: "" }, 9);
+assert.ok(
+	!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(split),
+	"lone surrogate in output",
+);
 console.log("smoke ok");

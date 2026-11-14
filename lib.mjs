@@ -371,7 +371,11 @@ export function render(result, maxChars) {
 	if (result.stderr) parts.push(`[stderr]\n${result.stderr}`);
 	const text = parts.join("\n").trimEnd();
 	if (text.length <= maxChars) return text;
-	return `${text.slice(0, maxChars)}\n…（已截断，全文 ${text.length} 字符）`;
+	// 别切在代理对中间：切出来的半个字符在 JSON 里会变成替换符
+	let cut = maxChars;
+	const code = text.charCodeAt(cut - 1);
+	if (code >= 0xd800 && code <= 0xdbff) cut -= 1;
+	return `${text.slice(0, cut)}\n…（已截断，全文 ${text.length} 字符）`;
 }
 
 export const clampChars = (value) =>
