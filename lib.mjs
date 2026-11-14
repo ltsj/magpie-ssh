@@ -277,6 +277,8 @@ function readPrivateKey(file) {
 export function connect(host, { timeoutMs = TOOL_BUDGET_MS, signal } = {}) {
 	return new Promise((resolve, reject) => {
 		const client = new Client();
+		// ssh2 的连接在握手之后还可能有 error（对端重启、网络断），没人听会直接把宿主炸掉
+		client.on("error", () => {});
 		const handshake = { error: null };
 		let settled = false;
 		const timer = setTimeout(() => {
@@ -313,16 +315,100 @@ export function connect(host, { timeoutMs = TOOL_BUDGET_MS, signal } = {}) {
 	});
 }
 
+// 同一个 agent 往往连着敲好几条命令：登录过的主机留一条连接复用，省掉每次 0.3~1 秒的握手。
+// 空闲 60 秒断开；命令超时/取消时整条连接作废（远端那条命令还在跑，不能留着同一个会话）。
+const IDLE_MS = 60000;
+const pool = new Map();
+
+// 认证凭据变了就是另一条连接：换了密码或私钥，不能拿旧会话继续用
+export const poolKey = (host) => {
+	const auth = host.password
+		? `password:${host.password}`
+		: host.identityFile
+			? `key:${host.identityFile}`
+			: "agent";
+	return `${host.user || "root"}@${host.host}:${Number(host.port) || 22}|${auth}`;
+};
+
+export const poolStats = () =>
+	[...pool.values()].map((entry) => ({ key: entry.key, busy: entry.busy }));
+
+const closeEntry = (entry) => {
+	if (entry.closed) return;
+	clearTimeout(entry.timer);
+	entry.closed = true;
+	// 只摘自己：不是复用池里的那条（reuse:false）时，池里同一台主机的条目不能被顺手删掉
+	if (pool.get(entry.key) === entry) pool.delete(entry.key);
+	const { client } = entry;
+	client.end();
+	// ssh2 的 end() 只发 DISCONNECT，半关的 socket 会一直占住事件循环（CLI 里表现成进程不退出）
+	const force = setTimeout(() => client.destroy?.(), 200);
+	force.unref?.();
+};
+
+export const releaseConnection = (entry, { broken = false } = {}) => {
+	if (broken || !entry.pooled) return closeEntry(entry);
+	entry.busy = Math.max(entry.busy - 1, 0);
+	if (entry.busy || entry.closed) return undefined;
+	clearTimeout(entry.timer);
+	entry.timer = setTimeout(() => closeEntry(entry), IDLE_MS);
+	// 空闲计时不能拖住宿主退出
+	entry.timer.unref?.();
+	return undefined;
+};
+
+export const closeAllConnections = () => {
+	for (const entry of [...pool.values()]) closeEntry(entry);
+};
+
+const openConnection = async (host, { timeoutMs, signal, reuse }) => {
+	const key = poolKey(host);
+	const cached = reuse === false ? undefined : pool.get(key);
+	if (cached && !cached.closed) {
+		cached.busy += 1;
+		clearTimeout(cached.timer);
+		return cached;
+	}
+	const client = await connect(host, { timeoutMs, signal });
+	const entry = {
+		key,
+		client,
+		busy: 1,
+		closed: false,
+		timer: null,
+		pooled: reuse !== false,
+	};
+	client.on("close", () => {
+		clearTimeout(entry.timer);
+		entry.closed = true;
+		if (pool.get(entry.key) === entry) pool.delete(entry.key);
+	});
+	if (entry.pooled) pool.set(key, entry);
+	return entry;
+};
+
 // 一个工具调用只有一份时间预算：连接花掉的时间从执行时间里扣，别让两者相加超过 magpie 的 55 秒。
 export async function execOnce(
 	host,
 	command,
-	{ timeoutMs = TOOL_BUDGET_MS, signal } = {},
+	{ timeoutMs = TOOL_BUDGET_MS, signal, reuse } = {},
 ) {
 	const started = Date.now();
 	const deadline = started + timeoutMs;
 	const left = () => Math.max(deadline - Date.now(), 1000);
-	const client = await connect(host, { timeoutMs: left(), signal });
+	const entry = await openConnection(host, {
+		timeoutMs: left(),
+		signal,
+		reuse,
+	});
+	const client = entry.client;
+	// 超时、取消、握手后出错都算这条连接不能再用了；只管放一次
+	let released = false;
+	const handOff = (broken) => {
+		if (released) return;
+		released = true;
+		releaseConnection(entry, { broken });
+	};
 	try {
 		const sink = makeSink(MAX_COLLECT_BYTES);
 		// 两个流各自解码、按到达顺序拼接：交错输出保持原样，切在多字节中间也不会坏字
@@ -351,7 +437,8 @@ export async function execOnce(
 			const stop = (why) => {
 				aborted = true;
 				reason ??= why;
-				client.end();
+				// 远端那条命令还在跑：整条连接作废，不留给下一条命令
+				handOff(true);
 				finish(-1);
 			};
 			const timer = setTimeout(() => stop("timeout"), left());
@@ -394,7 +481,7 @@ export async function execOnce(
 		result.host = host;
 		return result;
 	} finally {
-		client.end();
+		handOff(false);
 	}
 }
 
@@ -409,7 +496,7 @@ export async function execRemote(host, command, options = {}) {
 export async function execBatch(
 	hosts,
 	command,
-	{ timeoutMs = TOOL_BUDGET_MS, maxChars, signal, concurrency = 8 } = {},
+	{ timeoutMs = TOOL_BUDGET_MS, maxChars, signal, concurrency = 8, reuse } = {},
 ) {
 	const deadline = Date.now() + timeoutMs;
 	const left = () => Math.max(deadline - Date.now(), 1000);
@@ -422,6 +509,7 @@ export async function execBatch(
 				out[index] = await execOnce(hosts[index], command, {
 					timeoutMs: left(),
 					signal,
+					reuse,
 				});
 			} catch (error) {
 				out[index] = {
@@ -467,11 +555,17 @@ export async function transferRemote(
 	local,
 	remote,
 	direction,
-	{ timeoutMs = TOOL_BUDGET_MS, signal } = {},
+	{ timeoutMs = TOOL_BUDGET_MS, signal, reuse } = {},
 ) {
 	const deadline = Date.now() + timeoutMs;
 	const left = () => Math.max(deadline - Date.now(), 1000);
-	const client = await connect(host, { timeoutMs: left(), signal });
+	const entry = await openConnection(host, {
+		timeoutMs: left(),
+		signal,
+		reuse,
+	});
+	const client = entry.client;
+	let broken = false;
 	try {
 		const sftp = await new Promise((resolve, reject) => {
 			// SFTP 子系统的启动也算在预算里，否则它卡住就没有任何兜底
@@ -497,7 +591,8 @@ export async function transferRemote(
 		const path = remotePath(remote, home);
 		return await new Promise((resolve) => {
 			const timer = setTimeout(() => {
-				client.end();
+				broken = true;
+				closeEntry(entry);
 				resolve(`exit -1（传输超时，${timeoutMs} 毫秒）`);
 			}, left());
 			const done = (err) => {
@@ -512,7 +607,7 @@ export async function transferRemote(
 			else sftp.fastGet(path, local, done);
 		});
 	} finally {
-		client.end();
+		if (!broken) releaseConnection(entry);
 	}
 }
 

@@ -15,6 +15,7 @@ import {
 	audit,
 	batchBudget,
 	clampChars,
+	closeAllConnections,
 	auditFile,
 	connectConfig,
 	configDir,
@@ -27,6 +28,8 @@ import {
 	pickHosts,
 	readHosts,
 	registerHostKey,
+	poolKey,
+	poolStats,
 	remotePath,
 	render,
 	verifyHostKey,
@@ -68,6 +71,14 @@ const host = {
 
 // 没有配置文件时是空表
 assert.deepEqual(readHosts(null), []);
+// 复用的键跟着认证方式走：换密码、换端口、换用户都是另一条连接
+assert.notEqual(poolKey(host), poolKey({ ...host, password: "other" }));
+assert.notEqual(poolKey(host), poolKey({ ...host, port: 22 }));
+assert.notEqual(poolKey(host), poolKey({ ...host, user: "pi" }));
+assert.equal(poolKey(host), poolKey({ ...host, name: "改个名字" }));
+// 没连过就是空池，全关一遍也不炸
+assert.deepEqual(poolStats(), []);
+closeAllConnections();
 
 // 自己的条目没存主机时，也不能去捡别的插件的 hosts（那是别人的凭据）
 writePlugins([

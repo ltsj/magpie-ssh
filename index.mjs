@@ -19,6 +19,8 @@ import {
 
 export const MagpieSsh = async (_input, options) => {
 	const hosts = () => readHosts(options);
+	// 插件的 connectionReuse: false 可以关掉连接复用（改这个选项会重启宿主）
+	const reuse = options?.connectionReuse !== false;
 
 	return {
 		tool: {
@@ -134,11 +136,13 @@ export const MagpieSsh = async (_input, options) => {
 										timeoutMs,
 										maxChars,
 										signal: ctx?.abort,
+										reuse,
 									})
 								: await execRemote(picked.list[0], args.command, {
 										timeoutMs,
 										maxChars,
 										signal: ctx?.abort,
+										reuse,
 									});
 						audit(options, {
 							tool: "run",
@@ -177,7 +181,7 @@ export const MagpieSsh = async (_input, options) => {
 							expandHome(args.local),
 							String(args.remote),
 							"put",
-							{ signal: ctx?.abort },
+							{ signal: ctx?.abort, reuse },
 						);
 						audit(options, {
 							tool: "put",
@@ -216,7 +220,7 @@ export const MagpieSsh = async (_input, options) => {
 							expandHome(args.local),
 							String(args.remote),
 							"get",
-							{ signal: ctx?.abort },
+							{ signal: ctx?.abort, reuse },
 						);
 						audit(options, {
 							tool: "get",

@@ -63,6 +63,12 @@ claude mcp add --transport http magpie-ssh http://127.0.0.1:3425/mcp/magpie/tool
 
 插件选项里 `auditLog: true` 时，每次 `run`/`check`/`put`/`get` 往 `~/.config/magpie/magpie-ssh-audit.log` 追加一行 JSON（时间、工具、主机、命令、结果首行），多 agent 共用一台 root 机器时能查谁跑了什么。默认关闭；文件是 `0600`、目录 `0700`。**命令原文会原样记下来**（`mysql -p…`、`curl -H "Authorization: …"` 都会落盘），要带凭据的命令就别开日志。
 
+### 连接复用
+
+同一台主机的连接在调用之间留着：第一次握手 0.3~1 秒，之后同一条连接上再跑命令约 0.1 秒，远端看到的是同一个客户端端口。空闲 60 秒断开；命令超时或被取消时整条连接作废——远端那条命令还在跑，不能把它的会话留给下一条命令。认证信息变了（换密码、换私钥、换用户、换端口）就是另一条连接。多个 agent 同时用时会在同一条连接上开多个会话，互不干扰。
+
+想每次都用新连接：`magpie plugin options magpie-ssh '{"hosts":[…],"connectionReuse":false}'`（插件宿主在选项变更后重启，重启后生效）。
+
 ## 认证与主机指纹
 
 主机记录里 `password`、`identityFile` 二选一，都没有就用 ssh agent（`SSH_AUTH_SOCK`，Windows 上默认管道 `\\.\pipe\openssh-ssh-agent`）。`identityFile` 和 `put`/`get` 的 `local` 里 `~` 会展开；`put`/`get` 的远端路径写 `~` 或 `~/x` 会按远端 home 展开（SFTP 自己不做这件事），和 `run` 里 `~` 由远端 shell 展开的效果一致。私钥必须是个小于 1 MB 的普通文件（指向 `/dev/zero` 之类会在宿主事件循环上同步卡死，所以直接拒）。
