@@ -2,12 +2,14 @@
 // 工具每次调用都重新读 plugins.json，所以页面里改了立刻生效，不用重启宿主。
 // 这个文件只导出插件工厂：入口模块导出的每个函数都会被 magpie 当插件调用一次，辅助函数放 lib.mjs。
 import {
+	audit,
 	clampChars,
 	DEFAULT_MAX_CHARS,
 	execBatch,
 	execRemote,
 	expandHome,
 	pickHost,
+	pickHosts,
 	readHosts,
 	reach,
 	transferRemote,
@@ -42,7 +44,7 @@ export const MagpieSsh = async (_input, options) => {
 			},
 			check: {
 				description:
-					"只握手不发命令，报告每台主机能不能连、耗时多少；用来分清「网络不通」「认证被拒」「主机指纹对不上」。host 传 * 表示所有主机。",
+					"只握手不发命令，报告每台主机能不能连、耗时多少、服务器指纹是什么；用来分清「网络不通」「认证被拒」「主机指纹对不上」。host 传 * 表示所有主机，也可以逗号分隔多台。",
 				args: {
 					type: "object",
 					properties: {
@@ -59,20 +61,21 @@ export const MagpieSsh = async (_input, options) => {
 				},
 				async execute(args = {}, ctx) {
 					try {
-						const list = hosts();
-						if (!list.length) return "还没有配置任何主机。";
 						const timeoutMs = Number(args.timeoutMs) || 8000;
-						if (args.host === "*" || args.host === "all")
-							return (
-								await Promise.all(
-									list.map((host) =>
-										reach(host, { timeoutMs, signal: ctx?.abort }),
-									),
-								)
-							).join("\n");
-						const picked = pickHost(list, args.host);
+						const picked = pickHosts(hosts(), args.host);
 						if (picked.error) return picked.error;
-						return await reach(picked.host, { timeoutMs, signal: ctx?.abort });
+						const lines = await Promise.all(
+							picked.list.map((host) =>
+								reach(host, { timeoutMs, signal: ctx?.abort }),
+							),
+						);
+						const text = lines.join("\n");
+						audit(options, {
+							tool: "check",
+							hosts: picked.list.map((host) => host.name),
+							result: text.split("\n")[0],
+						});
+						return text;
 					} catch (error) {
 						return `exit -1\n[stderr]\n${error.message}`;
 					}
@@ -81,13 +84,14 @@ export const MagpieSsh = async (_input, options) => {
 
 			run: {
 				description:
-					"在已配置的 SSH 主机上执行一条命令，返回退出码与输出。命令由远端 shell 解释。host 传 * 表示所有主机并发执行（共享同一份时间预算）。",
+					"在已配置的 SSH 主机上执行一条命令，返回退出码与输出。命令由远端 shell 解释。host 传 * 表示所有主机并发执行（共享同一份时间预算），也可以逗号分隔多台；多台时末尾附成功/失败汇总。",
 				args: {
 					type: "object",
 					properties: {
 						host: {
 							type: "string",
-							description: "主机名（页面里填的名称），或 * 表示所有主机",
+							description:
+								"主机名（页面里填的名称），* 表示所有主机，或用逗号分隔多台",
 						},
 						command: { type: "string", description: "要执行的命令" },
 						timeoutMs: {
@@ -109,22 +113,27 @@ export const MagpieSsh = async (_input, options) => {
 					);
 					const maxChars = clampChars(args.maxChars);
 					try {
-						if (args.host === "*" || args.host === "all") {
-							const all = hosts();
-							if (!all.length) return "还没有配置任何主机。";
-							return await execBatch(all, args.command, {
-								timeoutMs,
-								maxChars,
-								signal: ctx?.abort,
-							});
-						}
-						const picked = pickHost(hosts(), args.host);
+						const picked = pickHosts(hosts(), args.host);
 						if (picked.error) return picked.error;
-						return await execRemote(picked.host, args.command, {
-							timeoutMs,
-							maxChars,
-							signal: ctx?.abort,
+						const text =
+							picked.list.length > 1
+								? await execBatch(picked.list, args.command, {
+										timeoutMs,
+										maxChars,
+										signal: ctx?.abort,
+									})
+								: await execRemote(picked.list[0], args.command, {
+										timeoutMs,
+										maxChars,
+										signal: ctx?.abort,
+									});
+						audit(options, {
+							tool: "run",
+							hosts: picked.list.map((host) => host.name),
+							command: args.command,
+							result: text.trimEnd().split("\n").pop(),
 						});
+						return text;
 					} catch (error) {
 						return `exit -1\n[stderr]\n${error.message}`;
 					}
@@ -148,13 +157,20 @@ export const MagpieSsh = async (_input, options) => {
 					if (!args.local || !args.remote)
 						return "需要 local、remote 两个路径。";
 					try {
-						return await transferRemote(
+						const text = await transferRemote(
 							picked.host,
 							expandHome(args.local),
 							String(args.remote),
 							"put",
 							{ signal: ctx?.abort },
 						);
+						audit(options, {
+							tool: "put",
+							hosts: [picked.host.name],
+							paths: [args.local, args.remote],
+							result: text.split("\n")[0],
+						});
+						return text;
 					} catch (error) {
 						return `exit -1\n[stderr]\n${error.message}`;
 					}
@@ -178,13 +194,20 @@ export const MagpieSsh = async (_input, options) => {
 					if (!args.local || !args.remote)
 						return "需要 remote、local 两个路径。";
 					try {
-						return await transferRemote(
+						const text = await transferRemote(
 							picked.host,
 							expandHome(args.local),
 							String(args.remote),
 							"get",
 							{ signal: ctx?.abort },
 						);
+						audit(options, {
+							tool: "get",
+							hosts: [picked.host.name],
+							paths: [args.remote, args.local],
+							result: text.split("\n")[0],
+						});
+						return text;
 					} catch (error) {
 						return `exit -1\n[stderr]\n${error.message}`;
 					}

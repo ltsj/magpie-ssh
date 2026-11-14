@@ -40,12 +40,12 @@ claude mcp add --transport http magpie-ssh http://127.0.0.1:3425/mcp/magpie/tool
 | 工具 | 参数 | 作用 |
 | --- | --- | --- |
 | `magpie-ssh_hosts` | 无 | 列出主机（名称、地址、认证方式，不含凭据） |
-| `magpie-ssh_check` | `host` | 只握手，回报是否连得上和耗时 |
+| `magpie-ssh_check` | `host` | 只握手，回报是否连得上、耗时、服务器指纹（`ssh-ed25519 SHA256:…`） |
 | `magpie-ssh_run` | `host`, `command`, `timeoutMs?`, `maxChars?` | 执行一条命令，回退出码和输出 |
 | `magpie-ssh_put` | `host`, `local`, `remote` | SFTP 上传 |
 | `magpie-ssh_get` | `host`, `remote`, `local` | SFTP 下载 |
 
-`host` 填名称、地址或记录 id 都行，不分大小写；`*` 或 `all` 表示全部主机，`run` 和 `check` 都支持。批量时每台机器一段，按 `== 名称 (user@host:port) ==` 分开，八台一组并发。
+`host` 填名称、地址或记录 id 都行，不分大小写；`*` 或 `all` 表示全部主机，也可以逗号分隔多台（`"OpenWrt,Debian"`），`run` 和 `check` 都支持。批量时每台机器一段，按 `== 名称 (user@host:port) ==` 分开，八台一组并发，`run` 末尾再加一行汇总（`总计 4/5 成功，失败：Debian(exit -1)`）。
 
 时间预算（magpie 每个工具最多 55 秒）：
 
@@ -56,9 +56,11 @@ claude mcp add --transport http magpie-ssh http://127.0.0.1:3425/mcp/magpie/tool
 | `check` | 8 秒 | — |
 | `put` / `get` | 45 秒 | — |
 
-连接和握手花掉的时间从同一份预算里扣，所以一次调用不会越过 magpie 的 55 秒被强行掐断。输出超过 4MB 只丢弃后续内容并在首行注明，**命令继续跑**，不会被杀；文本默认再截到 16000 字符（`maxChars`，上限 200000）。
+连接和握手花掉的时间从同一份预算里扣，所以一次调用不会越过 magpie 的 55 秒被强行掐断。输出超过 4MB 只丢弃后续内容并在首行注明，**命令继续跑**，不会被杀；文本默认再截到 16000 字符（`maxChars`，上限 200000），截断不会切出半个 emoji。stdout 和 stderr 按到达顺序拼在一起，stderr 在它出现的位置标 `[stderr]`——同一瞬间写出的两路可能被远端合并成一段，隔开写的就分得清。
 
 出错一律回文本，不抛异常：没有这台主机、缺参数、连不上、认证失败、指纹对不上，都变成 `exit -1` 加一句原因——宿主不会被弄挂（magpie 加载插件时会拿空参数探一次每个工具，抛异常会把整个插件标成失败）。
+
+插件选项里 `auditLog: true` 时，每次 `run`/`check`/`put`/`get` 往 `~/.config/magpie/magpie-ssh-audit.log` 追加一行 JSON（时间、工具、主机、命令、结果首行），多 agent 共用一台 root 机器时能查谁跑了什么。默认关闭；日志里不含密码。
 
 ## 认证与主机指纹
 
@@ -87,7 +89,9 @@ claude mcp add --transport http magpie-ssh http://127.0.0.1:3425/mcp/magpie/tool
 node test/smoke.mjs
 ```
 
-只测纯逻辑：读 `plugins.json` 的三种兜底、连接配置与认证优先级、`known_hosts` 指纹判断、输出截断、工具在坏参数和空配置下回文本而不抛。真连接不测（要真主机和凭据）。CI 在 `.github/workflows/ci.yml`（安装、跑上面的测试、`npm pack --dry-run`）。
+只测纯逻辑：读 `plugins.json` 的三种兜底、连接配置与认证优先级、`known_hosts` 指纹判断、`host` 多选解析、输出截断与 stdout/stderr 顺序、审计开关、工具在坏参数和空配置下回文本而不抛。真连接不测（要真主机和凭据）。CI 在 `.github/workflows/ci.yml`（安装、跑上面的测试、`npm pack --dry-run`）。
+
+要 Node ≥18（或 magpie 自带的 Bun）；唯一的依赖是 `ssh2`，没有原生构建。
 
 ## 许可
 

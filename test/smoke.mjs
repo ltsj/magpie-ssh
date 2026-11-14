@@ -1,15 +1,25 @@
 // 只测纯逻辑：读 plugins.json、连接配置、known_hosts 指纹判断、工具在坏参数下回文本而不抛。
 // 真连接不在这里测（要真主机和凭据）。
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	audit,
+	auditFile,
 	connectConfig,
+	fingerprint,
 	hostIds,
 	keyType,
 	makeSink,
 	pickHost,
+	pickHosts,
 	readHosts,
 	render,
 	verifyHostKey,
@@ -164,7 +174,7 @@ assert.match(
 );
 assert.match(
 	await bare.tool.check.execute({ host: "*" }),
-	/还没有配置任何主机/,
+	/还没有配置 SSH 主机/,
 );
 const sink = makeSink(10);
 assert.equal(sink.push(Buffer.from("1234")), true);
@@ -175,7 +185,7 @@ assert.equal(sink.push(Buffer.from("1")), false);
 
 assert.match(
 	await bare.tool.run.execute({ host: "*", command: "uname -a" }),
-	/还没有配置任何主机/,
+	/还没有配置 SSH 主机/,
 );
 
 // 超时只报断连；输出超限只丢内容并注记，两者不能互相假扮
@@ -197,4 +207,52 @@ assert.ok(
 	!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(split),
 	"lone surrogate in output",
 );
+
+// 逗号多选、* 全选、去重、未知名字要点名
+const three = [
+	{ name: "a", host: "1.1.1.1" },
+	{ name: "b", host: "2.2.2.2" },
+	{ name: "c", host: "3.3.3.3" },
+];
+assert.equal(pickHosts(three, "a,b").list.length, 2);
+assert.equal(pickHosts(three, "a,a").list.length, 1);
+assert.equal(pickHosts(three, "A").list[0].name, "a");
+assert.equal(pickHosts(three, "*").list.length, 3);
+assert.equal(pickHosts(three, "all").list.length, 3);
+assert.match(pickHosts(three, "a,zz").error, /没有叫 zz 的主机/);
+assert.match(pickHosts([], "*").error, /还没有配置 SSH 主机/);
+
+// 指纹格式和 ssh-keygen -lf 一样：SHA256: 加 base64、不带尾部 =
+const keyBlob = Buffer.concat([
+	Buffer.from([0, 0, 0, 7]),
+	Buffer.from("ssh-rsa"),
+	Buffer.from("payload"),
+]);
+assert.equal(keyType(keyBlob), "ssh-rsa");
+assert.match(fingerprint(keyBlob), /^SHA256:[A-Za-z0-9+/]+$/);
+assert.equal(fingerprint(keyBlob).length, 7 + 43);
+
+// stdout/stderr 交错时保持先后顺序，stderr 就地标一行
+const mixed = render(
+	{
+		code: 1,
+		aborted: false,
+		segments: [
+			{ kind: "out", text: "line1\n" },
+			{ kind: "err", text: "boom\n" },
+			{ kind: "out", text: "line2\n" },
+		],
+	},
+	1000,
+);
+assert.equal(mixed, "exit 1\nline1\n[stderr] boom\nline2");
+
+// 审计默认关：没开就不许落文件
+audit({}, { tool: "run", command: "ls" });
+audit({ auditLog: false }, { tool: "run", command: "ls" });
+assert.equal(existsSync(auditFile()), false);
+audit({ auditLog: true }, { tool: "run", hosts: ["a"], command: "ls" });
+const logged = readFileSync(auditFile(), "utf8").trim().split("\n");
+assert.equal(logged.length, 1);
+assert.equal(JSON.parse(logged[0]).command, "ls");
 console.log("smoke ok");
