@@ -4,7 +4,7 @@
 
 **在 magpie 侧边栏里维护 SSH 主机表，把这张表交给每个 agent 用**
 
-密码 / 私钥（口令也行）/ ssh agent · 连接复用 · 批量执行 · known_hosts 指纹校验 · 可选审计日志
+密码 / 私钥（口令也行）/ ssh agent · keyboard-interactive · 跳板机 · 连接复用 · 批量执行 · known_hosts 指纹校验 · 可选审计日志
 
 [![CI](https://github.com/ltsj/magpie-ssh/actions/workflows/ci.yml/badge.svg)](https://github.com/ltsj/magpie-ssh/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -20,7 +20,9 @@
 
 - **一份主机表，所有 agent 共用** — 插件注册 `hosts`、`check`、`run`、`put`、`get` 五个工具，magpie 把它们汇成自己的 MCP 服务器，omp / codex / pi / dsh / workbuddy 装好即用。
 - **纯 JS 的 SSH** — 只依赖 `ssh2`，不调用系统 ssh，没有原生构建，Node ≥18 或 magpie 自带的 Bun 都能跑。
-- **三种认证** — 密码、私钥（带口令的也行）、ssh agent，按这个顺序取第一个配了的。
+- **三种认证** — 密码、私钥（带口令的也行）、ssh agent，按这个顺序取第一个配了的；只给 keyboard-interactive 的服务器也能用密码登录。
+- **读 `~/.ssh/config`** — 主机只填别名，`HostName`、`User`、`Port`、`IdentityFile`、`ProxyJump`、`StrictHostKeyChecking` 自动补上；记录里自己填了的字段永远优先。
+- **跳板机** — 页面上填 `user@host:port`，或者直接用 `~/.ssh/config` 里的 `ProxyJump`，经跳板开一条通道连目标机。
 - **连接复用** — 同一台主机第一次握手 0.3~1 秒，之后约 0.1 秒；空闲 60 秒自动断开。
 - **真校验主机指纹** — 按 `known_hosts` 的规范身份比对，认哈希行和 `@revoked`；首次信任写在握手签名校验通过之后。
 - **批量执行** — `host` 传 `*` 或逗号分隔多台，八台并发、共享一份时间预算，末尾给成功/失败汇总。
@@ -60,7 +62,7 @@ claude mcp add --transport http magpie-ssh http://127.0.0.1:3425/mcp/magpie/tool
 
 ## 🖥️ 页面
 
-侧边栏「插件」分组里的 **SSH 主机**：名称、主机、端口、用户、密码、私钥路径与口令、主机指纹校验、备注；行内可编辑，删除要点两次。
+侧边栏「插件」分组里的 **SSH 主机**：名称、主机、端口、用户、跳板机、密码、私钥路径与口令、主机指纹校验、备注；行内可编辑，删除要点两次。主机可以只填 `~/.ssh/config` 里的别名，其余交给 config。
 
 页面在沙箱里跑（`connect-src 'none'`），没有网络、连不到插件宿主，所以它**只负责写设置**：不能自己测连接，不能生成密钥，也不读 `~/.ssh`。要验证一台主机连不连得上，让 agent 调 `check`。
 
@@ -82,7 +84,7 @@ claude mcp add --transport http magpie-ssh http://127.0.0.1:3425/mcp/magpie/tool
 
 ### host 怎么写
 
-填名称、地址或记录 id 都行，不分大小写。`*` 或 `all` 表示全部主机，也可以用逗号分隔多台（`"OpenWrt,Debian"`），`run` 和 `check` 都支持。批量时每台机器一段，按 `== 名称 (user@host:port) ==` 分开，八台一组并发，`run` 末尾再加一行汇总（`总计 4/5 成功，失败：Debian(exit -1)`）。
+填名称、地址或记录 id 都行，不分大小写。填的地址也可以是 `~/.ssh/config` 里的 `Host` 别名：`HostName`、`User`、`Port`、`IdentityFile`、`ProxyJump` 会作为缺省值补进来（记录里填了的优先，端口只在留空或还是 22 时才用 config 的）。`*` 或 `all` 表示全部主机，也可以用逗号分隔多台（`"OpenWrt,Debian"`），`run` 和 `check` 都支持。批量时每台机器一段，按 `== 名称 (user@host:port) ==` 分开，八台一组并发，`run` 末尾再加一行汇总（`总计 4/5 成功，失败：Debian(exit -1)`）。
 
 ### 时间预算
 
@@ -120,11 +122,32 @@ magpie 给每个工具 55 秒，插件自己留出余量：
 
 ### 三种认证
 
-主机记录里 `password`、`identityFile` 按顺序取第一个配了的，都没有就用 ssh agent（`SSH_AUTH_SOCK`，Windows 上默认管道 `\\\\.\\pipe\\openssh-ssh-agent`）。
+主机记录里没填 `user` 时按本机登录名登录（和 OpenSSH 一样）。`password`、`identityFile` 按顺序取第一个配了的，都没有就用 ssh agent（`SSH_AUTH_SOCK`，Windows 上默认管道 `\\\\.\\pipe\\openssh-ssh-agent`）。
 
 `identityFile` 和 `put`/`get` 的 `local` 里 `~` 会展开；`put`/`get` 的远端路径写 `~` 或 `~/x` 会按远端 home 展开（SFTP 自己不做这件事），和 `run` 里 `~` 由远端 shell 展开的效果一致。私钥必须是个小于 1 MB 的普通文件——指向 `/dev/zero` 之类会在宿主事件循环上同步卡死，所以直接拒。
 
 私钥带口令时把 `passphrase` 一起填上（页面上是「私钥口令」那一栏）。它只交给 ssh2 解私钥，不会当密码去登录；口令和密码一样明文存在 `plugins.json` 里。
+
+### keyboard-interactive
+
+有些服务器（多半是 PAM）不给 `password` 认证，只给 keyboard-interactive。配了密码时会开 `tryKeyboard`，把同一个密码当每个提示的回答；私钥和 agent 认证不开这个。验证码、二次确认这类提示过不去——那要人看手机，agent 代替不了。
+
+### 从 `~/.ssh/config` 补缺省值
+
+只读 `Host` 块和 `Host` 之外的全局默认；`Match` 块整块跳过，`%d`、`%h` 这类 token 不展开。一个块里只要有一个正向模式命中、且没被 `!` 模式排除就生效，同一个键以最先出现的值为准（和 OpenSSH 一样）。
+
+| 记录里的字段 | config 里的键 | 谁优先 |
+| --- | --- | --- |
+| `host` | `HostName` | 别名先按 config 换成本名；记录里直接写 IP/域名就不查 config |
+| `user` | `User` | 记录填了用记录 |
+| `port` | `Port` | 记录填了且不是 22 用记录；留空或 22 时用 config |
+| `identityFile` | `IdentityFile` | 记录填了用记录；config 写了多行取第一把 |
+| `proxyJump` | `ProxyJump` | 记录填了用记录 |
+| `strictHostKeyChecking` | `StrictHostKeyChecking` | 记录不是默认的 `accept-new` 时用记录 |
+
+跳板机只支持一跳：`ProxyJump a,b` 这种链只用第一跳。跳板自己的别名、用户、端口、私钥照样按 config 解析，但它不再往下套跳板。
+
+跳板机的登录凭据优先取页面里同名（或同主机）的那条主机记录——把跳板也当普通主机存一条，密码 / 私钥 / 口令就能直接用。记录里没有的字段再让 `~/.ssh/config` 和 ssh-agent 补；`user@host:port` 里写了用户就用写的那个。
 
 ### 指纹策略
 
@@ -142,8 +165,8 @@ magpie 给每个工具 55 秒，插件自己留出余量：
 
 ## ⚠️ 已知限制
 
-- **不读 `~/.ssh/config`** — 别名、`ProxyJump` 跳板机、`LocalForward` 都不会生效，主机字段得自己填全。
-- **不支持 keyboard-interactive** — 登录时还要再输一次验证码/密码的服务器连不上（`ssh2` 的 `tryKeyboard` 没开）。
+- **跳板机只支持一跳** — `ProxyJump a,b` 这样的多跳链只用第一跳；`LocalForward`、config 里的 `Match` 块、`%d`/`%h` 这类 token 都不支持。
+- **验证码过不去** — keyboard-interactive 只用密码回答，OTP / 二次确认的服务器连不上。
 - **`put` / `get` 只传单个文件** — 不递归目录、不续传、没有进度，大文件只靠 45 秒超时兜底。
 - **页面不能测连接、不能生成密钥** — 沙箱里没有网络，也不读 `~/.ssh`。
 
@@ -189,7 +212,7 @@ pnpm install
 node test/smoke.mjs        # 或者 pnpm test
 ```
 
-只测纯逻辑：读 `plugins.json` 的各种兜底与坏文件报错、连接配置与认证优先级（含私钥口令）、`known_hosts` 指纹判断、`host` 多选解析、输出截断与 stdout/stderr 顺序、审计开关与轮转、连接放回与「不连坐」、本机路径护栏、工具在坏参数和空配置下回文本而不抛。真连接不测（要真主机和凭据）。
+只测纯逻辑：读 `plugins.json` 的各种兜底与坏文件报错、连接配置与认证优先级（含私钥口令、keyboard-interactive）、`~/.ssh/config` 的别名/通配/排除与跳板机写法、`known_hosts` 指纹判断、`host` 多选解析、输出截断与 stdout/stderr 顺序、审计开关与轮转、连接放回与「不连坐」、本机路径护栏、工具在坏参数和空配置下回文本而不抛。真连接不测（要真主机和凭据）。
 
 改代码时注意三条硬约束：
 

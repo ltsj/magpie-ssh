@@ -5,6 +5,7 @@ const fields = {
 	host: $("f-host"),
 	port: $("f-port"),
 	user: $("f-user"),
+	proxyJump: $("f-jump"),
 	password: $("f-pw"),
 	identityFile: $("f-key"),
 	passphrase: $("f-pass"),
@@ -39,6 +40,7 @@ function readForm() {
 		host: fields.host.value.trim(),
 		port: Number(fields.port.value) || 22,
 		user: fields.user.value.trim(),
+		proxyJump: fields.proxyJump.value.trim(),
 		identityFile: fields.identityFile.value.trim(),
 		passphrase: fields.passphrase.value,
 		strictHostKeyChecking: fields.strictHostKeyChecking.value,
@@ -51,6 +53,7 @@ function readForm() {
 	if (!draft.password) delete draft.password;
 	if (!draft.strictHostKeyChecking) delete draft.strictHostKeyChecking;
 	if (!draft.user) delete draft.user;
+	if (!draft.proxyJump) delete draft.proxyJump;
 	if (!draft.note) delete draft.note;
 	return draft;
 }
@@ -60,6 +63,7 @@ function fillForm(host) {
 	fields.host.value = host ? host.host : "";
 	fields.port.value = host ? host.port || 22 : "";
 	fields.user.value = host ? host.user || "" : "";
+	fields.proxyJump.value = host ? host.proxyJump || "" : "";
 	fields.identityFile.value = host ? host.identityFile || "" : "";
 	fields.passphrase.value = host ? host.passphrase || "" : "";
 	fields.password.value = host ? host.password || "" : "";
@@ -104,7 +108,8 @@ function render() {
 					? "  私钥+口令"
 					: "  私钥"
 				: "";
-		where.textContent = target + auth;
+		where.textContent =
+			target + auth + (host.proxyJump ? `  经 ${host.proxyJump}` : "");
 		main.append(name, where);
 		if (host.note) {
 			const note = document.createElement("span");
@@ -205,6 +210,7 @@ const HOST_FIELDS = [
 	"password",
 	"identityFile",
 	"passphrase",
+	"proxyJump",
 	"strictHostKeyChecking",
 	"note",
 ];

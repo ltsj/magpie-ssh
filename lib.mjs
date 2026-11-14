@@ -8,7 +8,7 @@ import {
 	rmSync,
 	statSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { Client } from "ssh2";
@@ -276,6 +276,153 @@ export function registerHostKey(line, file = knownHostsFile()) {
 	}
 }
 
+// 用户没填时按本机的登录名走（和 OpenSSH 一样）；ssh2 不接受空用户名，
+// 以前这里会直接报 "Invalid username"。
+const localUser = () => {
+	try {
+		return userInfo().username;
+	} catch {
+		return process.env.USER || process.env.USERNAME || "";
+	}
+};
+
+// ---- ~/.ssh/config ----
+export const sshConfigFile = () => join(homedir(), ".ssh", "config");
+
+const unquote = (value) =>
+	String(value ?? "")
+		.trim()
+		.replace(/^"(.*)"$/, "$1")
+		.replace(/^'(.*)'$/, "$1");
+
+// 只解析本插件用得上的那一层：Host 块、键值、注释，Match 块整块跳过。
+// 每个块里同一个键保留第一次出现的值（OpenSSH 也是先到先得）。
+export function parseSshConfig(text) {
+	const blocks = [];
+	let current = null;
+	let skipping = false;
+	for (const raw of String(text ?? "").split(/\r?\n/)) {
+		const line = raw.replace(/(^|\s)#.*$/, "").trim();
+		if (!line) continue;
+		const space = line.search(/\s/);
+		const key = (space < 0 ? line : line.slice(0, space)).toLowerCase();
+		const rest = space < 0 ? "" : line.slice(space + 1).trim();
+		if (key === "host") {
+			skipping = false;
+			current = { patterns: rest.split(/\s+/).filter(Boolean), options: {} };
+			blocks.push(current);
+			continue;
+		}
+		if (key === "match") {
+			// Match 的条件（exec、canonical 等）算不过来，跳过整块，免得把里面的值当成默认
+			skipping = true;
+			current = null;
+			continue;
+		}
+		if (skipping) continue;
+		if (!current) {
+			// 文件开头没有 Host 的选项是全局默认
+			current = { patterns: ["*"], options: {} };
+			blocks.push(current);
+		}
+		if (!(key in current.options)) current.options[key] = rest;
+	}
+	return blocks;
+}
+
+// Host 模式支持 * 和 ?，前面加 ! 是排除；主机名不分大小写。
+const hostMatcher = (pattern) => {
+	const body = unquote(pattern);
+	const negate = body.startsWith("!");
+	const glob = negate ? body.slice(1) : body;
+	const source = glob
+		.replace(/[.+^${}()|[\]\\]/g, "\\$&")
+		.replace(/\*/g, ".*")
+		.replace(/\?/g, ".");
+	const re = new RegExp(`^${source}$`, "i");
+	return { negate, test: (name) => re.test(name) };
+};
+
+// 按 OpenSSH 的规则挑出这台主机能用到的选项：一个块里只要有一个正向模式命中、
+// 且没有被 ! 模式排除，整块就生效；同一个键以最先出现的值为准。
+export function sshConfigOptions(name, file = sshConfigFile()) {
+	const text = String(name ?? "").trim();
+	if (!text) return {};
+	let content;
+	try {
+		content = readFileSync(file, "utf8");
+	} catch {
+		return {};
+	}
+	const options = {};
+	for (const block of parseSshConfig(content)) {
+		let hit = false;
+		let blocked = false;
+		for (const pattern of block.patterns) {
+			const matcher = hostMatcher(pattern);
+			if (!matcher.test(text)) continue;
+			if (matcher.negate) {
+				blocked = true;
+				break;
+			}
+			hit = true;
+		}
+		if (blocked || !hit) continue;
+		for (const [key, value] of Object.entries(block.options))
+			if (!(key in options)) options[key] = unquote(value);
+	}
+	return options;
+}
+
+// 跳板机写法：user@host:port、host、[::1]:22；none 表示不用跳板。
+export function parseProxyJump(value) {
+	const text = String(value ?? "").trim();
+	if (!text || text.toLowerCase() === "none") return null;
+	const at = text.lastIndexOf("@");
+	const user = at >= 0 ? unquote(text.slice(0, at)) : "";
+	let rest = at >= 0 ? text.slice(at + 1) : text;
+	let port = 0;
+	const bracketed = /^\[([^\]]+)\](?::(\d+))?$/.exec(rest);
+	if (bracketed) {
+		rest = bracketed[1];
+		port = Number(bracketed[2]) || 0;
+	} else {
+		const colon = /^([^:]+):(\d+)$/.exec(rest);
+		if (colon) {
+			rest = colon[1];
+			port = Number(colon[2]) || 0;
+		}
+	}
+	return rest ? { user, host: rest, port } : null;
+}
+
+// 主机记录叠上 ~/.ssh/config 的缺省值：记录里填了的以记录为准。
+// 端口例外：页面总会写个 22，只有端口留空或还是 22 时才让 config 的 Port 生效。
+export function resolveSshHost(host, file = sshConfigFile()) {
+	const alias = String(host?.host ?? "").trim();
+	const options = sshConfigOptions(alias, file);
+	const resolved = { ...host, __sshResolved: true };
+	if (options.hostname) resolved.host = unquote(options.hostname);
+	if (!resolved.user && options.user) resolved.user = unquote(options.user);
+	const declaredPort = Number(host?.port) || 0;
+	const configPort = Number(options.port) || 0;
+	resolved.port =
+		declaredPort && declaredPort !== 22
+			? declaredPort
+			: configPort || declaredPort || 22;
+	if (!resolved.identityFile && options.identityfile) {
+		// IdentityFile 可以写很多行，取第一把；%d 这类 token 不展开
+		resolved.identityFile = unquote(options.identityfile).split(/\s+/)[0];
+	}
+	if (!resolved.proxyJump) resolved.proxyJump = unquote(options.proxyjump ?? "");
+	// 页面默认值 accept-new 表示「没特意选」：config 里明确写了 yes / no 才盖过去
+	const mode = String(options.stricthostkeychecking ?? "").toLowerCase();
+	if (!host?.strictHostKeyChecking || host.strictHostKeyChecking === "accept-new") {
+		if (mode === "yes" || mode === "no") resolved.strictHostKeyChecking = mode;
+	}
+	return resolved;
+}
+
 export function connectConfig(host, { handshake } = {}) {
 	const port = Number(host.port) || 22;
 	const config = {
@@ -290,9 +437,13 @@ export function connectConfig(host, { handshake } = {}) {
 			return check.ok;
 		},
 	};
-	if (host.user) config.username = String(host.user);
-	if (host.password) config.password = String(host.password);
-	else if (host.identityFile) {
+	config.username = String(host.user || localUser());
+	if (host.password) {
+		config.password = String(host.password);
+		// 有些服务器（多半是 PAM）只给 keyboard-interactive 不给 password：
+		// 允许把同一个密码当成交互式提示的回答再试一次。
+		config.tryKeyboard = true;
+	} else if (host.identityFile) {
 		config.privateKey = readPrivateKey(host.identityFile);
 		// 带口令的私钥：ssh2 解析时要用 passphrase 解密，没有它会报 "Encrypted private
 		// OpenSSH key detected, but no passphrase given" —— 口令当密码用不管事，两种认证走两条路
@@ -310,12 +461,125 @@ function readPrivateKey(file) {
 	return readFileSync(path);
 }
 
-// 连上就交出去，调用方负责 client.end()。密码、私钥、agent 三种认证在 connectConfig 里选。
+// 跳板机：只支持一跳。跳板自己的别名、用户、端口、私钥照样按 ~/.ssh/config 解析。
+const openJumpChannel = (client, toHost, toPort, timeoutMs) =>
+	new Promise((resolve, reject) => {
+		const timer = setTimeout(
+			() =>
+				reject(
+					new Error(
+						`跳板机没在 ${timeoutMs} 毫秒内打开通往 ${toHost}:${toPort} 的通道`,
+					),
+				),
+			timeoutMs,
+		);
+		client.forwardOut("127.0.0.1", 0, toHost, toPort, (error, stream) => {
+			clearTimeout(timer);
+			if (error)
+				reject(
+					new Error(
+						`跳板机打不开通往 ${toHost}:${toPort} 的通道：${error.message ?? error}`,
+					),
+				);
+			else resolve(stream);
+		});
+	});
+
+// 跳板机自己的凭据从哪来：页面里同名（或同主机）的那条记录优先，
+// 记录里没写的再让 ~/.ssh/config 和 agent 补。
+const findSavedJumpHost = (jump) => {
+	const { hosts } = readHostsState();
+	const wanted = String(jump.host).toLowerCase();
+	const byName = hosts.find(
+		(item) => String(item.name ?? "").toLowerCase() === wanted,
+	);
+	if (byName) return byName;
+	return hosts.find((item) => String(item.host ?? "").toLowerCase() === wanted);
+};
+
+const connectViaJump = async (target, jump, { timeoutMs, signal }) => {
+	const deadline = Date.now() + timeoutMs;
+	const left = () => Math.max(deadline - Date.now(), 1000);
+	const saved = findSavedJumpHost(jump);
+	const jumpHost = resolveSshHost({
+		name: saved?.name || `${target.name || target.host} 的跳板`,
+		host: jump.host,
+		user: jump.user || saved?.user,
+		port: jump.port || saved?.port || 22,
+		password: saved?.password,
+		identityFile: saved?.identityFile,
+		passphrase: saved?.passphrase,
+	});
+	// 别名在 config 里没写 HostName 时，用页面记录里填的真地址
+	if (saved?.host && jumpHost.host === jump.host) jumpHost.host = saved.host;
+	// 跳板的 config 里再写 ProxyJump 也不往下套：多跳压平成一跳
+	jumpHost.proxyJump = "";
+	let jumpClient;
+	try {
+		jumpClient = await connectDirect(jumpHost, {
+			timeoutMs: left(),
+			signal,
+		});
+	} catch (error) {
+		throw new Error(
+			`连不上跳板机 ${jumpHost.user ? `${jumpHost.user}@` : ""}${jumpHost.host}:${jumpHost.port}：${error.message ?? error}`,
+		);
+	}
+	let stream;
+	try {
+		stream = await openJumpChannel(jumpClient, target.host, target.port, left());
+	} catch (error) {
+		jumpClient.end();
+		throw error;
+	}
+	try {
+		const client = await connectDirect(target, {
+			timeoutMs: left(),
+			signal,
+			sock: stream,
+		});
+		// 目标连接关了就把跳板连接也关掉，否则那条 TCP 会一直挂着
+		client.once("close", () => jumpClient.end());
+		return client;
+	} catch (error) {
+		try {
+			stream.destroy();
+		} catch {
+			// 通道已经没了
+		}
+		jumpClient.end();
+		throw error;
+	}
+};
+
+// 连上就交出去，调用方负责 client.end()。主机记录先叠上 ~/.ssh/config 的缺省值；
+// 配了 ProxyJump（页面上的「跳板机」或 config 里的）就先连跳板，再从跳板开一条通道。
 export function connect(host, { timeoutMs = TOOL_BUDGET_MS, signal } = {}) {
+	const target = host?.__sshResolved ? host : resolveSshHost(host);
+	const jump = parseProxyJump(target.proxyJump);
+	if (!jump) return connectDirect(target, { timeoutMs, signal });
+	return connectViaJump(target, jump, { timeoutMs, signal });
+}
+
+// 直连：密码、私钥、agent 三种认证在 connectConfig 里选。
+function connectDirect(
+	host,
+	{ timeoutMs = TOOL_BUDGET_MS, signal, sock } = {},
+) {
 	return new Promise((resolve, reject) => {
 		const client = new Client();
 		// ssh2 的连接在握手之后还可能有 error（对端重启、网络断），没人听会直接把宿主炸掉
 		client.on("error", () => {});
+		// 服务器只给 keyboard-interactive 时，把密码当每个提示的回答。
+		// 验证码/二次确认的提示也会拿到这个密码，连不上是正常的，但不比直接拒绝更差。
+		if (host.password) {
+			client.on(
+				"keyboard-interactive",
+				(_name, _instructions, _lang, prompts, finish) => {
+					finish(prompts.map(() => String(host.password)));
+				},
+			);
+		}
 		const handshake = { error: null };
 		let settled = false;
 		const timer = setTimeout(() => {
@@ -345,7 +609,10 @@ export function connect(host, { timeoutMs = TOOL_BUDGET_MS, signal } = {}) {
 		});
 		client.once("error", fail);
 		try {
-			client.connect(connectConfig(host, { handshake }));
+			const config = connectConfig(host, { handshake });
+			// 跳板机转发出来的通道直接当底层 socket 用
+			if (sock) config.sock = sock;
+			client.connect(config);
 		} catch (error) {
 			fail(error);
 		}
@@ -357,14 +624,19 @@ export function connect(host, { timeoutMs = TOOL_BUDGET_MS, signal } = {}) {
 const IDLE_MS = 60000;
 const pool = new Map();
 
-// 认证凭据变了就是另一条连接：换了密码或私钥，不能拿旧会话继续用
+// 认证凭据变了就是另一条连接：换了密码或私钥，不能拿旧会话继续用。
+// 跳板链也算进去：同一台目标机经不同跳板过去，远端看到的是不同来源。
 export const poolKey = (host) => {
 	const auth = host.password
 		? `password:${host.password}`
 		: host.identityFile
-			? `key:${host.identityFile}`
+			? `key:${expandHome(host.identityFile)}`
 			: "agent";
-	return `${host.user || "root"}@${host.host}:${Number(host.port) || 22}|${auth}`;
+	const jump = parseProxyJump(host.proxyJump);
+	const via = jump
+		? `|via:${jump.user ? `${jump.user}@` : ""}${jump.host}:${jump.port || 22}`
+		: "";
+	return `${host.user || localUser() || "root"}@${host.host}:${Number(host.port) || 22}|${auth}${via}`;
 };
 
 export const poolStats = () =>
@@ -406,14 +678,17 @@ export const closeAllConnections = () => {
 };
 
 const openConnection = async (host, { timeoutMs, signal, reuse }) => {
-	const key = poolKey(host);
+	// 先按 ~/.ssh/config 补缺省值，再用补好的身份做连接池的键：
+	// 别名和它的真名、config 里给的端口，才算同一条连接
+	const target = host?.__sshResolved ? host : resolveSshHost(host);
+	const key = poolKey(target);
 	const cached = reuse === false ? undefined : pool.get(key);
 	if (cached && !cached.closed) {
 		cached.busy += 1;
 		clearTimeout(cached.timer);
 		return cached;
 	}
-	const client = await connect(host, { timeoutMs, signal });
+	const client = await connect(target, { timeoutMs, signal });
 	const entry = {
 		key,
 		client,

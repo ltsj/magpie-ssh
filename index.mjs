@@ -42,7 +42,8 @@ export const MagpieSsh = async (_input, options) => {
 								: host.identityFile
 									? `私钥 ${host.identityFile}${host.passphrase ? "（带口令）" : ""}`
 									: "ssh agent";
-							return `- ${host.name}  ${target}  ${auth}${host.note ? `  ${host.note}` : ""}`;
+							const via = host.proxyJump ? `（经 ${host.proxyJump}）` : "";
+							return `- ${host.name}  ${target}${via}  ${auth}${host.note ? `  ${host.note}` : ""}`;
 						})
 						.join("\n");
 				},

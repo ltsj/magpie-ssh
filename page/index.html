@@ -19,6 +19,7 @@
       <label>主机<input id="f-host" placeholder="1.2.3.4 或 example.com" required></label>
       <label>端口<input id="f-port" type="number" min="1" max="65535" placeholder="22"></label>
       <label>用户<input id="f-user" placeholder="root"></label>
+      <label class="wide">跳板机（可选：user@host:port，或留空用 ~/.ssh/config 的 ProxyJump）<input id="f-jump" placeholder="bastion 或 ops@10.0.0.1:2222"></label>
       <label class="wide">密码（留空用私钥或 ssh agent）<input id="f-pw" type="password" autocomplete="new-password"></label>
       <label class="wide">私钥（留空用 ssh agent / ~/.ssh 里的默认身份）<input id="f-key" placeholder="~/.ssh/id_ed25519"></label>
       <label class="wide">私钥口令（只有带口令的私钥才填，明文存着）<input id="f-pass" type="password" autocomplete="new-password"></label>

@@ -2,6 +2,23 @@
 
 版本号跟着 npm 包走，`0.x` 期间小版本之间可能有行为变化，破坏性改动会写在这里。
 
+## 0.7.0
+
+### 新增
+
+- 读 `~/.ssh/config`：主机记录里只填一个 `Host` 别名，`HostName`、`User`、`Port`、`IdentityFile`、`ProxyJump`、`StrictHostKeyChecking` 会自动补上。记录里自己填了的字段永远优先；端口只在留空或还是默认的 22 时才让 config 的 `Port` 生效。
+- 跳板机：页面加了「跳板机」一栏，也可以直接写 `~/.ssh/config` 的 `ProxyJump`。经 ssh2 的 `forwardOut` 从跳板开一条通道，目标机的连接复用键里包含跳板链。只支持一跳，多跳压平成一跳。
+- keyboard-interactive 登录：只给 PAM / 键盘交互、不给 `password` 认证的服务器，现在会用密码回答提示。验证码类提示仍然过不去（要人看手机）。
+
+### 修复
+
+- 主机没填「用户」时按本机登录名登录，不再报 `Invalid username`（ssh2 不接受空用户名）。
+- 跳板机的凭据优先取页面里同名或同主机的那条记录，取不到才退到 `~/.ssh/config` 的 `IdentityFile` 和 ssh-agent；连不上跳板时错误里写明是跳板机，不再只丢一个 `ECONNREFUSED`。
+
+### 其他
+
+- 连接池的键用补好缺省值之后的身份：别名和它的真名、config 给的端口，会复用同一条连接。
+
 ## 0.6.0
 
 ### 新增

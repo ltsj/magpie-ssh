@@ -9,7 +9,7 @@ import {
 	readFileSync,
 	writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import {
 	audit,
@@ -25,16 +25,20 @@ import {
 	hostIds,
 	keyType,
 	makeSink,
+	parseProxyJump,
+	parseSshConfig,
 	pickHost,
 	pickHosts,
 	readHosts,
 	readHostsState,
 	registerHostKey,
+	resolveSshHost,
 	releaseConnection,
 	poolKey,
 	poolStats,
 	remotePath,
 	render,
+	sshConfigOptions,
 	verifyHostKey,
 } from "../lib.mjs";
 import * as entry from "../index.mjs";
@@ -142,6 +146,16 @@ process.env.SSH_AUTH_SOCK = "\\\\pipe\\test-agent";
 const agented = connectConfig({ name: "a", host: "h" });
 assert.equal(agented.agent, "\\\\pipe\\test-agent");
 assert.equal(agented.password, undefined);
+// 只给 password 认证的服务器不吃 password、只给 keyboard-interactive：
+// 密码认证时开 tryKeyboard，把同一个密码当提示的回答；私钥/agent 不开
+assert.equal(connectConfig(host).tryKeyboard, true);
+assert.equal(keyed.tryKeyboard, undefined);
+assert.equal(agented.tryKeyboard, undefined);
+// 用户没填时按本机登录名走：ssh2 不接受空用户名，以前会直接报 Invalid username
+assert.equal(
+	connectConfig({ name: "u", host: "h" }).username,
+	userInfo().username,
+);
 
 // known_hosts：登记要等握手通过（不在指纹校验里写）、yes 拒未知、指纹变了拒
 const known = join(home, "known_hosts");
@@ -485,5 +499,97 @@ assert.ok(existsSync(`${auditFile()}.1`), "超限的旧日志该转到 .1");
 const rotated = readFileSync(auditFile(), "utf8").trim().split("\n");
 assert.equal(rotated.length, 1);
 assert.equal(JSON.parse(rotated[0]).command, "after-rotate");
+
+// ---- ~/.ssh/config：别名、缺省值、跳板机 ----
+// 只解析本插件用得上的那层：Host 块、键值；Match 整块跳过
+const sshConfigPath = join(home, "sshconfig");
+writeFileSync(
+	sshConfigPath,
+	[
+		"# 全局默认",
+		"ServerAliveInterval 30",
+		"",
+		"Host web",
+		"  HostName 10.0.0.9",
+		"  User deploy",
+		"  Port 2222",
+		"  IdentityFile ~/.ssh/id_web",
+		"",
+		"Host *.lab !db.lab",
+		"  User labuser",
+		"  ProxyJump ops@bastion:22022",
+		"",
+		"Host db.lab",
+		"  User dbadmin",
+		"",
+		"Match host infinity",
+		"  User never",
+		"",
+		"Host *",
+		"  StrictHostKeyChecking no",
+	].join("\n"),
+);
+const sshText = readFileSync(sshConfigPath, "utf8");
+// 文件开头没有 Host 的选项是全局默认，也算一个块；Match 块整个跳过
+assert.equal(parseSshConfig(sshText).length, 5);
+assert.equal(sshConfigOptions("web", sshConfigPath).serveraliveinterval, "30");
+assert.equal(sshConfigOptions("web", sshConfigPath).hostname, "10.0.0.9");
+assert.equal(sshConfigOptions("web", sshConfigPath).user, "deploy");
+assert.equal(sshConfigOptions("web", sshConfigPath).port, "2222");
+assert.equal(sshConfigOptions("web", sshConfigPath).identityfile, "~/.ssh/id_web");
+assert.equal(sshConfigOptions("web", sshConfigPath).stricthostkeychecking, "no");
+// 通配和排除：*.lab 命中 a.lab，但 db.lab 被 !db.lab 排除，走自己的块
+assert.equal(sshConfigOptions("a.lab", sshConfigPath).user, "labuser");
+assert.equal(sshConfigOptions("a.lab", sshConfigPath).proxyjump, "ops@bastion:22022");
+assert.equal(sshConfigOptions("db.lab", sshConfigPath).user, "dbadmin");
+assert.equal(sshConfigOptions("db.lab", sshConfigPath).proxyjump, undefined);
+// 读不到文件当成没有配置
+assert.deepEqual(sshConfigOptions("web", join(home, "nope")), {});
+
+assert.deepEqual(parseProxyJump("ops@bastion:22022"), {
+	user: "ops",
+	host: "bastion",
+	port: 22022,
+});
+assert.deepEqual(parseProxyJump("bastion"), { user: "", host: "bastion", port: 0 });
+assert.deepEqual(parseProxyJump("[::1]:2222"), { user: "", host: "::1", port: 2222 });
+assert.equal(parseProxyJump("none"), null);
+assert.equal(parseProxyJump(""), null);
+
+// 记录叠 config：别名换成 HostName，用户/端口/私钥/跳板都补上
+const webHost = resolveSshHost({ name: "web", host: "web", port: 22 }, sshConfigPath);
+assert.equal(webHost.host, "10.0.0.9");
+assert.equal(webHost.user, "deploy");
+assert.equal(webHost.port, 2222);
+assert.equal(webHost.identityFile, "~/.ssh/id_web");
+assert.equal(webHost.strictHostKeyChecking, "no");
+// 记录里自己填了的以记录为准，config 不能盖掉
+const ownHost = resolveSshHost(
+	{ name: "own", host: "web", port: 2201, user: "me", strictHostKeyChecking: "yes" },
+	sshConfigPath,
+);
+assert.equal(ownHost.port, 2201);
+assert.equal(ownHost.user, "me");
+assert.equal(ownHost.strictHostKeyChecking, "yes");
+// config 里的 ProxyJump 会进到记录里，页面上的跳板机优先
+assert.equal(
+	resolveSshHost({ name: "l", host: "a.lab" }, sshConfigPath).proxyJump,
+	"ops@bastion:22022",
+);
+assert.equal(
+	resolveSshHost({ name: "l", host: "a.lab", proxyJump: "mine" }, sshConfigPath)
+		.proxyJump,
+	"mine",
+);
+// 不认识的别名原样保留，只吃到 Host * 的默认
+const plainHost = resolveSshHost({ name: "p", host: "1.2.3.4" }, sshConfigPath);
+assert.equal(plainHost.host, "1.2.3.4");
+assert.equal(plainHost.port, 22);
+// 跳板链进连接池的键：经不同跳板过去算两条连接，none 和不填一样
+assert.notEqual(poolKey({ ...host, proxyJump: "bastion" }), poolKey(host));
+assert.equal(
+	poolKey({ ...host, proxyJump: "none" }),
+	poolKey({ ...host, proxyJump: "" }),
+);
 
 console.log("smoke ok");
