@@ -57,30 +57,31 @@ claude mcp add --transport http magpie-ssh http://127.0.0.1:3425/mcp/magpie/tool
 | `put` / `get` | 45 秒 | — |
 
 连接和握手花掉的时间从同一份预算里扣，所以一次调用不会越过 magpie 的 55 秒被强行掐断。输出超过 4MB 只丢弃后续内容并在首行注明，**命令继续跑**，不会被杀；文本默认再截到 16000 字符（`maxChars`，上限 200000），截断不会切出半个 emoji。stdout 和 stderr 按到达顺序拼在一起，stderr 在它出现的位置标 `[stderr]`——同一瞬间写出的两路可能被远端合并成一段，隔开写的就分得清。
-调用被取消（宿主掐断）时回 `exit -1（调用被取消，连接已断开）`，和超时、成功三者互不冒充。
+调用被取消（宿主掐断）时回 `exit -1（调用被取消，连接已断开）`，和超时、成功三者互不冒充。命令被信号杀死（`kill`、OOM）或者连接在拿到退出码之前断了，也一样是 `exit -1` 并在 `[stderr]` 里写明原因——不会冒充 `exit 0`。
 
 出错一律回文本，不抛异常：没有这台主机、缺参数、连不上、认证失败、指纹对不上，都变成 `exit -1` 加一句原因——宿主不会被弄挂（magpie 加载插件时会拿空参数探一次每个工具，抛异常会把整个插件标成失败）。
 
-插件选项里 `auditLog: true` 时，每次 `run`/`check`/`put`/`get` 往 `~/.config/magpie/magpie-ssh-audit.log` 追加一行 JSON（时间、工具、主机、命令、结果首行），多 agent 共用一台 root 机器时能查谁跑了什么。默认关闭；日志里不含密码。
+插件选项里 `auditLog: true` 时，每次 `run`/`check`/`put`/`get` 往 `~/.config/magpie/magpie-ssh-audit.log` 追加一行 JSON（时间、工具、主机、命令、结果首行），多 agent 共用一台 root 机器时能查谁跑了什么。默认关闭；文件是 `0600`、目录 `0700`。**命令原文会原样记下来**（`mysql -p…`、`curl -H "Authorization: …"` 都会落盘），要带凭据的命令就别开日志。
 
 ## 认证与主机指纹
 
-主机记录里 `password`、`identityFile` 二选一，都没有就用 ssh agent（`SSH_AUTH_SOCK`，Windows 上默认管道 `\\.\pipe\openssh-ssh-agent`）。`identityFile` 和 `put`/`get` 的 `local` 里 `~` 会展开；`put`/`get` 的远端路径写 `~/x` 会按远端 home 展开（SFTP 自己不做这件事），和 `run` 里 `~` 由远端 shell 展开的效果一致。
+主机记录里 `password`、`identityFile` 二选一，都没有就用 ssh agent（`SSH_AUTH_SOCK`，Windows 上默认管道 `\\.\pipe\openssh-ssh-agent`）。`identityFile` 和 `put`/`get` 的 `local` 里 `~` 会展开；`put`/`get` 的远端路径写 `~` 或 `~/x` 会按远端 home 展开（SFTP 自己不做这件事），和 `run` 里 `~` 由远端 shell 展开的效果一致。私钥必须是个小于 1 MB 的普通文件（指向 `/dev/zero` 之类会在宿主事件循环上同步卡死，所以直接拒）。
 
 `strictHostKeyChecking`：
 
 | 值 | 行为 |
 | --- | --- |
-| `accept-new`（页面默认） | 第一次见就写进 `~/.ssh/known_hosts`；写过之后再变就拒绝 |
+| `accept-new`（页面默认，也是没填时的行为） | 第一次见就等握手签名校验通过后写进 `~/.ssh/known_hosts`；写过之后再变就拒绝 |
 | `yes` | 必须在 `known_hosts` 里且一致，否则拒绝并说明 |
-| 空（「交给 ssh 默认」） | 放行，不落盘、不校验 |
+| `no`（「不校验」） | 完全不管 `known_hosts`：不比对、也不登记。只有 `@revoked` 仍然生效 |
 
-指纹按「规范身份」比：22 端口就是主机名，其他端口是 `[host]:port`——所以同一台机器的 22 端口有记录，不会让你连 2222 端口时被误报成「指纹变了」。`known_hosts` 的哈希行（`|1|salt|hmac`，Linux 上 `HashKnownHosts` 默认会写）能正确复算匹配；`@revoked` 命中直接拒绝。不支持的：`*.example.com` 这类通配条目、证书主机（`@cert-authority`）——遇到这类行按「没有记录」处理，`accept-new` 会补一行明文记录，`yes` 会让先用密码/私钥连一次。指纹真变了的时候，确认机器没换过再删掉 `known_hosts` 里那一行。
+指纹按「规范身份」比：22 端口就是主机名，其他端口是 `[host]:port`——所以同一台机器的 22 端口有记录，不会让你连 2222 端口时被误报成「指纹变了」。`known_hosts` 的哈希行（`|1|salt|hmac`，Linux 上 `HashKnownHosts` 默认会写）能正确复算匹配。`@revoked` 是全局的：只比钥匙、不看主机字段，命中就拒（连「不校验」的主机也拒）。登记发生在握手签名校验之后，路上塞一把假钥匙不会被钉进 `known_hosts`。不支持的：`*.example.com` 这类通配条目、证书主机（`@cert-authority`）——遇到这类行按「没有记录」处理。指纹真变了的时候，确认机器没换过再删掉 `known_hosts` 里那一行。
 
 ## 安全边界
 
 - 密码是以**明文**存在 `~/.config/magpie/plugins.json` 里的（magpie 的 `plugin-auth.json` 也这样）。不想明文就改用私钥或 agent，把密码字段留空。
 - agent 一旦能用这些主机，就能以你的身份在那些机器上执行任意命令。别把 root 主机随手加进来。
+- `put`/`get` 的本机路径是**真**的本机路径，没有沙箱：`get` 能覆盖本机任何文件，`put` 能把本机任何文件传出去。唯一的护栏是：`get` 不许往 `~/.ssh` 和 magpie 配置目录（`plugins.json` 就在里面）写，`put` 不许从配置目录取文件。其余路径照旧——被内容注入的 agent 仍可能把别的文件带走，传文件前自己看清楚参数。
 - `magpie plugin rm` 会把插件设置一起删掉，删之前先备份 `hosts`。
 - 工具以你的权限运行，结果只回给调用它的那个 agent。
 

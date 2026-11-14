@@ -13,15 +13,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	audit,
+	batchBudget,
+	clampChars,
 	auditFile,
 	connectConfig,
+	configDir,
 	fingerprint,
+	guardLocal,
 	hostIds,
 	keyType,
 	makeSink,
 	pickHost,
 	pickHosts,
 	readHosts,
+	registerHostKey,
 	remotePath,
 	render,
 	verifyHostKey,
@@ -64,16 +69,22 @@ const host = {
 // 没有配置文件时是空表
 assert.deepEqual(readHosts(null), []);
 
-// 按 spec 匹配，同一个插件出现两次时只认存了主机的那个
+// 自己的条目没存主机时，也不能去捡别的插件的 hosts（那是别人的凭据）
 writePlugins([
 	{ spec: "magpie-ssh", options: {} },
 	{ spec: "C:\\some\\other\\place", options: { hosts: [host] } },
 ]);
-assert.equal(readHosts(null)[0].name, "prod");
+assert.deepEqual(readHosts(null), []);
 
-// spec 认不出时按 options 形状兜底（git、文件夹路径的写法）
+// spec 里没有 magpie-ssh 的插件不碰：别的插件也可能有 hosts 字段
 writePlugins([{ spec: "some-fork", options: { hosts: [host] } }]);
-assert.equal(readHosts(null).length, 1);
+assert.equal(readHosts(null).length, 0);
+// 同一个插件被装了两次、其中一条是空的残留时，认真有主机的那条
+writePlugins([
+	{ spec: "github:ltsj/magpie-ssh", options: { hosts: [] } },
+	{ spec: "magpie-ssh@0.4.2", options: { hosts: [host] } },
+]);
+assert.equal(readHosts(null)[0].name, "prod");
 
 // 文件里没有时用宿主给的 options 快照
 assert.equal(readHosts({ hosts: [host] }).length, 1);
@@ -92,13 +103,18 @@ const keyFile = join(home, "id_test");
 writeFileSync(keyFile, "-----BEGIN OPENSSH PRIVATE KEY-----\nnot a real key\n");
 const keyed = connectConfig({ name: "k", host: "h", identityFile: keyFile });
 assert.ok(Buffer.isBuffer(keyed.privateKey));
+// 私钥路径不是普通文件、或者大到能把宿主卡死，直接拒
+assert.throws(
+	() => connectConfig({ name: "k", host: "h", identityFile: home }),
+	/私钥文件不可用/,
+);
 assert.equal(keyed.password, undefined);
 process.env.SSH_AUTH_SOCK = "\\\\pipe\\test-agent";
 const agented = connectConfig({ name: "a", host: "h" });
 assert.equal(agented.agent, "\\\\pipe\\test-agent");
 assert.equal(agented.password, undefined);
 
-// known_hosts：accept-new 落盘、yes 拒未知、指纹变了拒
+// known_hosts：登记要等握手通过（不在指纹校验里写）、yes 拒未知、指纹变了拒
 const known = join(home, "known_hosts");
 const blob = Buffer.concat([
 	(() => {
@@ -113,13 +129,30 @@ assert.equal(keyType(blob), "ssh-ed25519");
 
 const unknown = { host: "10.0.0.5", port: 2222 };
 assert.equal(verifyHostKey(unknown, blob, "yes", known).ok, false);
-assert.equal(verifyHostKey(unknown, blob, "accept-new", known).ok, true);
-assert.equal(verifyHostKey(unknown, blob, "accept-new", known).ok, true);
+const first = verifyHostKey(unknown, blob, "accept-new", known);
+assert.equal(first.ok, true);
 assert.equal(
-	verifyHostKey(unknown, blob, "accept-new", known).ok,
-	true,
-	"第二次应该命中 known_hosts",
+	first.register,
+	`[10.0.0.5]:2222 ssh-ed25519 ${blob.toString("base64")}`,
 );
+assert.equal(existsSync(known), false, "指纹校验里不许写 known_hosts");
+registerHostKey(first.register, known);
+registerHostKey("随便一行不是 known_hosts 格式", known);
+assert.equal(readFileSync(known, "utf8").trim().split("\n").length, 1);
+assert.equal(verifyHostKey(unknown, blob, "accept-new", known).ok, true);
+assert.equal(verifyHostKey(unknown, blob, "yes", known).ok, true);
+// 没填 / 空的 strictHostKeyChecking 都按 accept-new：首次就登记
+const skipped = verifyHostKey(unknown, blob, "", join(home, "known_skip"));
+assert.equal(skipped.ok, true);
+assert.match(skipped.register, /^\[10\.0\.0\.5\]:2222 ssh-ed25519 /);
+assert.equal(
+	verifyHostKey(unknown, blob, undefined, join(home, "known_skip")).register,
+	skipped.register,
+);
+// 只有明确的 no 才是不校验也不登记
+const off = verifyHostKey(unknown, blob, "no", join(home, "known_off"));
+assert.equal(off.ok, true);
+assert.equal(off.register, undefined);
 
 const other = Buffer.concat([blob, Buffer.from([9])]);
 const mismatch = verifyHostKey(unknown, other, "accept-new", known);
@@ -151,23 +184,26 @@ assert.equal(
 	true,
 );
 
-// @revoked 必须拒绝；@cert-authority 认识不了，跳过而不是当噪音命中
+// @revoked 只看钥匙、不看主机字段（OpenSSH 的吊销是全局的）；@cert-authority 做不到，跳过
 const markerFile = join(home, "known_markers");
 writeFileSync(
 	markerFile,
-	`@revoked 10.0.0.5 ssh-ed25519 ${blob.toString("base64")}\n@cert-authority *.lan ssh-ed25519 AAAA\n`,
+	`@revoked * ssh-ed25519 ${blob.toString("base64")}\n@cert-authority *.lan ssh-ed25519 AAAA\n`,
 );
-const revoked = verifyHostKey(
-	{ host: "10.0.0.5" },
-	blob,
-	"accept-new",
-	markerFile,
-);
-assert.equal(revoked.ok, false);
-assert.match(revoked.error, /@revoked/);
+for (const mode of ["accept-new", "yes", "no"]) {
+	const revoked = verifyHostKey({ host: "10.0.0.5" }, blob, mode, markerFile);
+	assert.equal(revoked.ok, false);
+	assert.match(revoked.error, /@revoked/);
+}
+// 别的主机用同一把被吊销的钥匙也不行
 assert.equal(
-	verifyHostKey({ host: "10.0.0.5" }, blob, "yes", markerFile).ok,
+	verifyHostKey({ host: "other.example" }, blob, "accept-new", markerFile).ok,
 	false,
+);
+// 不同钥匙不受影响
+assert.equal(
+	verifyHostKey({ host: "other.example" }, other, "accept-new", markerFile).ok,
+	true,
 );
 
 // SFTP 不认 ~：客户端要自己按远端 home 展开，run 里的 ~ 由远端 shell 展开
@@ -313,4 +349,32 @@ audit({ auditLog: true }, { tool: "run", hosts: ["a"], command: "ls" });
 const logged = readFileSync(auditFile(), "utf8").trim().split("\n");
 assert.equal(logged.length, 1);
 assert.equal(JSON.parse(logged[0]).command, "ls");
+// 批量输出是「一次调用」的预算，不能 8 台各给满额
+assert.equal(batchBudget(16000, 5), 3200);
+assert.equal(batchBudget(16000, 1), 16000);
+assert.equal(batchBudget(200000, 8), 25000);
+assert.equal(batchBudget(undefined, 3), 5333);
+// 台数多到每台不足 200 时不再往下摊，否则报错信息会被切没
+assert.equal(batchBudget(1000, 5), 200);
+// 负数、NaN 都走默认，不会切出 "" 或奇怪的下标
+assert.equal(clampChars(-5), 16000);
+assert.equal(clampChars(Number.NaN), 16000);
+assert.equal(clampChars(1), 200);
+// 本机路径护栏：get 不许往凭据目录写，put 不许从插件设置里取
+// Windows / macOS 上大小写不敏感：.SSH 照样能碰到真目录
+if (process.platform !== "linux") {
+	assert.match(guardLocal(join(home, ".SSH", "id_ed25519"), "get"), /不动/);
+	assert.match(
+		guardLocal(join(home, ".Config", "magpie", "plugins.json"), "put"),
+		/不动/,
+	);
+}
+assert.match(guardLocal(join(configDir(), "plugins.json"), "get"), /不动/);
+assert.match(guardLocal(join(home, ".ssh", "authorized_keys"), "get"), /不动/);
+assert.match(guardLocal(join(configDir(), "plugins.json"), "put"), /不动/);
+assert.equal(
+	guardLocal(join(tmpdir(), "elsewhere", "id_ed25519"), "put"),
+	null,
+);
+assert.equal(guardLocal(join(tmpdir(), "elsewhere", "a.txt"), "get"), null);
 console.log("smoke ok");

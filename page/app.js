@@ -55,17 +55,25 @@ function fillForm(host) {
 	fields.user.value = host ? host.user || "" : "";
 	fields.identityFile.value = host ? host.identityFile || "" : "";
 	fields.password.value = host ? host.password || "" : "";
-	fields.strictHostKeyChecking.value = host
-		? host.strictHostKeyChecking || ""
-		: "accept-new";
+	// 老记录没有这个字段：插件按 accept-new 处理，页面也得选在 accept-new 上
+	const strict = host ? host.strictHostKeyChecking : "accept-new";
+	fields.strictHostKeyChecking.value =
+		strict === "yes" || strict === "no" ? strict : "accept-new";
 	fields.note.value = host ? host.note || "" : "";
 }
 
 async function persist(next) {
-	const current = (await magpie.options.get()) || {};
-	const saved = await magpie.options.set({ ...current, hosts: next });
-	hosts = Array.isArray(saved?.hosts) ? saved.hosts : next;
-	render();
+	try {
+		const current = (await magpie.options.get()) || {};
+		const saved = await magpie.options.set({ ...current, hosts: next });
+		hosts = Array.isArray(saved?.hosts) ? saved.hosts : next;
+		render();
+		return true;
+	} catch (error) {
+		// 选项每秒只能写一次；失败必须说出来，否则点了按钮像没反应
+		flash(`没存下来：${error?.message ?? error}`, true);
+		return false;
+	}
 }
 
 function render() {
@@ -109,7 +117,7 @@ function render() {
 		remove.type = "button";
 		remove.className = "danger";
 		remove.textContent = "删除";
-		remove.addEventListener("click", () => {
+		remove.addEventListener("click", async () => {
 			if (armedDelete !== host.id) {
 				armedDelete = host.id;
 				remove.textContent = "再点一次";
@@ -122,9 +130,8 @@ function render() {
 				return;
 			}
 			armedDelete = null;
-			persist(hosts.filter((item) => item.id !== host.id)).then(() =>
-				flash("已删除"),
-			);
+			if (await persist(hosts.filter((item) => item.id !== host.id)))
+				flash("已删除");
 		});
 
 		buttons.append(edit, remove);
@@ -140,12 +147,15 @@ function stopEditing() {
 	$("cancel").hidden = true;
 }
 
-$("form").addEventListener("submit", (event) => {
+$("form").addEventListener("submit", async (event) => {
 	event.preventDefault();
 	const draft = readForm();
 	if (!draft.name || !draft.host) return flash("名称和主机必填", true);
+	// 名字要按大小写不敏感查重：agent 传 host 名时也是不敏感的
 	const duplicate = hosts.find(
-		(item) => item.name === draft.name && item.id !== editingId,
+		(item) =>
+			item.name.toLowerCase() === draft.name.toLowerCase() &&
+			item.id !== editingId,
 	);
 	if (duplicate) return flash("这个名称已经有了", true);
 	const next = editingId
@@ -153,10 +163,15 @@ $("form").addEventListener("submit", (event) => {
 				item.id === editingId ? { ...draft, id: editingId } : item,
 			)
 		: [...hosts, { ...draft, id: newId() }];
-	persist(next).then(() => {
-		flash(editingId ? "已保存" : "已添加");
-		stopEditing();
-	});
+	$("submit").disabled = true;
+	try {
+		if (await persist(next)) {
+			flash(editingId ? "已保存" : "已添加");
+			stopEditing();
+		}
+	} finally {
+		$("submit").disabled = false;
+	}
 });
 
 $("cancel").addEventListener("click", stopEditing);

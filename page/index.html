@@ -24,7 +24,7 @@
       <label>主机指纹校验
         <select id="f-strict">
           <option value="accept-new">accept-new（首次信任，变了就拒）</option>
-          <option value="">交给 ssh 默认</option>
+          <option value="no">不校验（不安全，谁都能冒充这台主机）</option>
           <option value="yes">yes（必须在 known_hosts 里）</option>
         </select>
       </label>

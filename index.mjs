@@ -8,6 +8,7 @@ import {
 	execBatch,
 	execRemote,
 	expandHome,
+	guardLocal,
 	pickHost,
 	pickHosts,
 	readHosts,
@@ -64,10 +65,22 @@ export const MagpieSsh = async (_input, options) => {
 						const timeoutMs = Math.min(Number(args.timeoutMs) || 8000, 50000);
 						const picked = pickHosts(hosts(), args.host);
 						if (picked.error) return picked.error;
-						const lines = await Promise.all(
-							picked.list.map((host) =>
-								reach(host, { timeoutMs, signal: ctx?.abort }),
-							),
+						// 多台时共享同一份预算、最多 8 条并发：几十台一起握手会撞穿 55 秒
+						const list = picked.list;
+						const deadline = Date.now() + timeoutMs;
+						const lines = new Array(list.length);
+						let next = 0;
+						const worker = async () => {
+							while (next < list.length) {
+								const index = next++;
+								lines[index] = await reach(list[index], {
+									timeoutMs: Math.max(deadline - Date.now(), 1000),
+									signal: ctx?.abort,
+								});
+							}
+						};
+						await Promise.all(
+							Array.from({ length: Math.min(8, list.length) }, worker),
 						);
 						const text = lines.join("\n");
 						audit(options, {
@@ -156,6 +169,8 @@ export const MagpieSsh = async (_input, options) => {
 					if (picked.error) return picked.error;
 					if (!args.local || !args.remote)
 						return "需要 local、remote 两个路径。";
+					const blocked = guardLocal(args.local, "put");
+					if (blocked) return blocked;
 					try {
 						const text = await transferRemote(
 							picked.host,
@@ -193,6 +208,8 @@ export const MagpieSsh = async (_input, options) => {
 					if (picked.error) return picked.error;
 					if (!args.local || !args.remote)
 						return "需要 remote、local 两个路径。";
+					const blocked = guardLocal(args.local, "get");
+					if (blocked) return blocked;
 					try {
 						const text = await transferRemote(
 							picked.host,

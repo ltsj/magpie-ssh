@@ -1,8 +1,8 @@
 // 辅助函数放在这里，不放进 index.mjs：magpie 会把入口模块导出的每个函数都当插件工厂调用一次。
 import { createHash, createHmac } from "node:crypto";
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { Client } from "ssh2";
 
@@ -61,9 +61,12 @@ export function readHosts(fallback) {
 	const plugins = db?.plugins ?? [];
 	// 同名插件可能以不同 spec 出现（另一个版本、git 写法），只认真的存了主机的那个。
 	const bySpec = plugins.filter((item) => normalize(item.spec).includes(SPEC));
+	// 只认 spec 里带 magpie-ssh 的条目（别的插件也可能有 hosts 字段）；
+	// 同一个插件被装了两次时优先真有主机的那条，免得被空的残留条目遮住
+	const holders = bySpec.filter((item) => isHostsHolder(item.options));
 	const entry =
-		bySpec.find((item) => isHostsHolder(item.options)) ??
-		plugins.find((item) => isHostsHolder(item.options)) ??
+		holders.find((item) => item.options.hosts.length) ??
+		holders[0] ??
 		bySpec[0];
 	const hosts = entry?.options?.hosts;
 	if (Array.isArray(hosts)) return hosts;
@@ -170,51 +173,73 @@ export function readKnownHosts(file = knownHostsFile()) {
 // 条目是否覆盖这个身份：明文直接比，哈希形式按 |1|salt|hmac 复算。
 const coversHost = (entry, id) =>
 	entry.hosts.some((pattern) => {
-		if (!pattern.startsWith("|1|")) return pattern === id;
+		if (!pattern.startsWith("|1|"))
+			return pattern.toLowerCase() === id.toLowerCase();
 		const [, , salt, hash] = pattern.split("|");
 		if (!salt || !hash) return false;
 		const mac = createHmac("sha1", Buffer.from(salt, "base64"))
-			.update(id)
+			.update(id.toLowerCase())
 			.digest("base64");
 		return mac === hash;
 	});
 
-// accept-new：没记录就写进 known_hosts；记录在但指纹不一样就拒绝。
-// yes：必须在 known_hosts 里且一致。不写：直接放行，不落盘。
+// yes：必须在 known_hosts 里且一致。no/空：不校验也不登记。其余（含 accept-new）：
+// 没记录就等握手通过后登记一行，见 registerHostKey；记录在但指纹不一样就拒绝。
 // 只认规范身份：22 端口用主机名，其他端口用 [host]:port——否则同主机别的端口会被误判成指纹变了。
 export function verifyHostKey(host, blob, mode, file = knownHostsFile()) {
 	const base64 = blob.toString("base64");
-	const id = hostIds(host).at(-1);
-	const entries = readKnownHosts(file).filter((entry) => coversHost(entry, id));
-	if (entries.some((entry) => entry.blob === base64)) {
-		if (entries.some((entry) => entry.marker === "@revoked"))
-			return {
-				ok: false,
-				error: `known_hosts 把 ${id} 的这把钥匙标成了吊销（@revoked），拒绝连接。`,
-			};
-		return { ok: true };
-	}
+	// known_hosts 里的主机名一律小写比（OpenSSH 也是先转小写再算哈希）
+	const id = String(hostIds(host).at(-1)).toLowerCase();
+	// 只有 yes / no 是明确指令，其余（没填、""、拼错的）都按 accept-new
+	const check = mode === "yes" || mode === "no" ? mode : "accept-new";
+	const all = readKnownHosts(file);
+	// @revoked 是全局的：不看主机字段，这把钥匙被吊销就是吊销
+	if (all.some((entry) => entry.marker === "@revoked" && entry.blob === base64))
+		return {
+			ok: false,
+			error: `known_hosts 把这把主机钥匙标成了吊销（@revoked），拒绝连接 ${id}。`,
+		};
+	// 吊销比「不校验」优先：这把钥匙明确不认了，连「不校验」的主机也拒
+	if (check === "no") return { ok: true };
+	const entries = all.filter((entry) => !entry.marker && coversHost(entry, id));
+	if (entries.some((entry) => entry.blob === base64)) return { ok: true };
 	if (entries.length) {
 		return {
 			ok: false,
 			error: `主机 ${host.host} 的指纹和 known_hosts 里的不一样，可能是换了机器或中间人。确认无误后删掉 known_hosts 里对应那一行再说。`,
 		};
 	}
-	if (mode === "yes") {
+	if (check === "yes") {
 		return {
 			ok: false,
 			error: `known_hosts 里没有 ${id}，而指纹校验设成了 yes。先用 ssh 连一次，或在页面里把校验改成 accept-new。`,
 		};
 	}
-	if (mode === "accept-new") {
-		try {
-			mkdirSync(dirname(file), { recursive: true });
-			appendFileSync(file, `${id} ${keyType(blob)} ${base64}\n`);
-		} catch {
-			// 写不进去不影响本次连接
-		}
+	try {
+		return { ok: true, register: `${id} ${keyType(blob)} ${base64}` };
+	} catch {
+		return { ok: true };
 	}
-	return { ok: true };
+}
+
+// 登记要等握手签名校验通过之后再写：在 hostVerifier 里写，路上的攻击者塞一把垃圾钥匙
+// 就能把首见主机钉死，之后连真机全变「指纹不一样」。
+export function registerHostKey(line, file = knownHostsFile()) {
+	if (!/^[A-Za-z0-9._:[\]-]+ ssh-[a-z0-9-]+ [A-Za-z0-9+/=]+$/.test(line))
+		return;
+	try {
+		mkdirSync(dirname(file), { recursive: true });
+		let lead = "";
+		try {
+			const text = readFileSync(file, "utf8");
+			if (text.length && !text.endsWith("\n")) lead = "\n";
+		} catch {
+			// 文件还不存在
+		}
+		appendFileSync(file, `${lead}${line}\n`);
+	} catch {
+		// 写不进去不影响本次连接
+	}
 }
 
 export function connectConfig(host, { handshake } = {}) {
@@ -227,15 +252,25 @@ export function connectConfig(host, { handshake } = {}) {
 			if (handshake) handshake.key = blob;
 			const check = verifyHostKey(host, blob, host.strictHostKeyChecking);
 			if (!check.ok && handshake) handshake.error = check.error;
+			if (check.register && handshake) handshake.register = check.register;
 			return check.ok;
 		},
 	};
 	if (host.user) config.username = String(host.user);
 	if (host.password) config.password = String(host.password);
 	else if (host.identityFile)
-		config.privateKey = readFileSync(expandHome(host.identityFile));
+		config.privateKey = readPrivateKey(host.identityFile);
 	else if (agentPath()) config.agent = agentPath();
 	return config;
+}
+
+// 私钥必须是个正常大小的小文件：指向 /dev/zero 或几 GB 的文件会在宿主事件循环上同步阻塞。
+function readPrivateKey(file) {
+	const path = expandHome(file);
+	const stat = statSync(path);
+	if (!stat.isFile() || stat.size > 1024 * 1024)
+		throw new Error(`私钥文件不可用：${path}（要是个小于 1 MB 的普通文件）`);
+	return readFileSync(path);
 }
 
 // 连上就交出去，调用方负责 client.end()。密码、私钥、agent 三种认证在 connectConfig 里选。
@@ -263,6 +298,8 @@ export function connect(host, { timeoutMs = TOOL_BUDGET_MS, signal } = {}) {
 			clearTimeout(timer);
 			// 指纹留给调用方展示：加新主机时先看它、再决定信任
 			if (handshake.key) client.hostKey = handshake.key;
+			// 握手过了才登记：此时主机密钥签名已经校验过
+			if (handshake.register) registerHostKey(handshake.register);
 			if (signal)
 				signal.addEventListener("abort", () => client.end(), { once: true });
 			resolve(client);
@@ -335,9 +372,19 @@ export async function execOnce(
 				};
 				stream.on("data", collect("out", decoders.out));
 				stream.stderr.on("data", collect("err", decoders.err));
-				stream.on("close", (code) => {
+				// exit-signal 时 ssh2 给 code=null，通道没等到 exit-status 就关也是 null：
+				// 被信号杀死、半路掉线都不能报成功，agent 会当成命令跑完了
+				stream.on("close", (code, signalText) => {
 					clearTimeout(timer);
-					finish(aborted ? -1 : (code ?? 0));
+					if (aborted) return finish(-1);
+					if (typeof code === "number") return finish(code);
+					push(
+						"err",
+						signalText
+							? `被信号中断（${signalText}），没有退出码。`
+							: "连接在拿到退出码之前断开了。",
+					);
+					return finish(-1);
 				});
 			});
 		});
@@ -387,10 +434,12 @@ export async function execBatch(
 	await Promise.all(
 		Array.from({ length: Math.min(concurrency, hosts.length) }, worker),
 	);
+	// 预算是「这次调用」的：8 台各给满额会把调用方的上下文撑爆，按台分摊。
+	const perHost = batchBudget(maxChars, hosts.length);
 	const body = hosts
 		.map(
 			(host, index) =>
-				`== ${host.name || host.host} (${host.user || "root"}@${host.host}:${host.port || 22}) ==\n${render(out[index], clampChars(maxChars))}`,
+				`== ${host.name || host.host} (${host.user || "root"}@${host.host}:${host.port || 22}) ==\n${render(out[index], perHost)}`,
 		)
 		.join("\n\n");
 	const ok = out.filter((item) => item.code === 0).length;
@@ -407,8 +456,9 @@ export async function execBatch(
 // SFTP 不展开 ~（那是客户端的事），run 里的 ~ 由远端 shell 展开，两边行为要一致。
 export const remotePath = (value, home) => {
 	const text = String(value ?? "");
-	if (!text.startsWith("~/")) return text;
 	if (!home) return text;
+	if (text === "~") return home;
+	if (!text.startsWith("~/")) return text;
 	return `${String(home).replace(/\/+$/, "")}/${text.slice(2)}`;
 };
 
@@ -424,7 +474,16 @@ export async function transferRemote(
 	const client = await connect(host, { timeoutMs: left(), signal });
 	try {
 		const sftp = await new Promise((resolve, reject) => {
-			client.sftp((err, sftp) => (err ? reject(err) : resolve(sftp)));
+			// SFTP 子系统的启动也算在预算里，否则它卡住就没有任何兜底
+			const timer = setTimeout(
+				() => reject(new Error("打开 SFTP 超时")),
+				left(),
+			);
+			client.sftp((err, handle) => {
+				clearTimeout(timer);
+				if (err) reject(err);
+				else resolve(handle);
+			});
 		});
 		const home = await new Promise((resolve) => {
 			if (!String(remote).startsWith("~/")) return resolve(null);
@@ -505,21 +564,51 @@ export function render(result, maxChars) {
 	return `${text.slice(0, cut)}\n…（已截断，全文 ${text.length} 字符）`;
 }
 
-export const clampChars = (value) =>
-	Math.min(Number(value) || DEFAULT_MAX_CHARS, 200000);
+export const clampChars = (value) => {
+	// 负数、0、NaN 都走默认；下限 200 保证报错信息还能留在返回值里
+	const wanted = Math.floor(Number(value));
+	const size =
+		Number.isFinite(wanted) && wanted > 0 ? wanted : DEFAULT_MAX_CHARS;
+	return Math.min(Math.max(size, 200), 200000);
+};
+
+// 一次批量调用的输出上限按台分摊：整份结果不超出 maxChars，每台至少留 200 字符报错。
+export const batchBudget = (maxChars, count) =>
+	Math.max(200, Math.floor(clampChars(maxChars) / Math.max(count, 1)));
 
 // 审计日志默认关：多 agent 共用一台 root 主机时，把谁在什么时候跑了什么记成一行 JSON。
-const configDir = () =>
+export const configDir = () =>
 	process.env.XDG_CONFIG_HOME || join(homedir(), ".config", "magpie");
 export const auditFile = () => join(configDir(), "magpie-ssh-audit.log");
+
+// 被内容注入的 agent 能拿 get 覆盖本机凭据、拿 put 把 plugins.json（明文密码）传出去：
+// 只拦这两个目录，其余路径照旧——本地路径就是给人用的。
+export function guardLocal(file, direction) {
+	// Windows 和 macOS 的文件系统不区分大小写（~/.SSH/id_ed25519 照样能覆盖），比较前统一小写
+	const fold = (value) =>
+		process.platform === "linux" ? value : value.toLowerCase();
+	const full = fold(resolve(expandHome(file)));
+	const dirs =
+		direction === "get"
+			? [configDir(), join(homedir(), ".ssh")]
+			: [configDir()];
+	for (const dir of dirs) {
+		const root = resolve(dir);
+		if (full === fold(root) || full.startsWith(fold(`${root}${sep}`)))
+			return `不动 ${root}：那是存凭据的地方，${direction === "get" ? "get 不对着它写" : "put 不从它取文件"}。要传就自己复制到别处再传。`;
+	}
+	return null;
+}
 
 export function audit(options, record) {
 	if (!options?.auditLog) return;
 	try {
-		mkdirSync(dirname(auditFile()), { recursive: true });
+		// 命令原文里可能带凭据：只有本人能读
+		mkdirSync(dirname(auditFile()), { recursive: true, mode: 0o700 });
 		appendFileSync(
 			auditFile(),
 			`${JSON.stringify({ ts: new Date().toISOString(), ...record })}\n`,
+			{ mode: 0o600 },
 		);
 	} catch {
 		// 记日志失败不能影响调用本身
