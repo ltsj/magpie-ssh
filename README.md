@@ -21,7 +21,7 @@ magpie 会把每个插件的工具作为独立 MCP 服务器写进各 agent 的�
 http://127.0.0.1:3425/mcp/magpie/tools/magpie-ssh
 ```
 
-omp / codex / pi / dsh / workbuddy 装好即写入，**重启 agent** 后出现 `magpie-ssh_hosts`、`magpie-ssh_check`、`magpie-ssh_run`、`magpie-ssh_put`、`magpie-ssh_get`。别的 MCP 客户端：
+omp / codex / pi / dsh / workbuddy 装好即写入，**重启 agent** 后就能调用。这个地址下的工具名是插件自己的 `hosts`、`check`、`run`、`put`、`get`；magpie 的汇总地址 `/mcp/magpie/tools` 才带 `magpie-ssh_` 前缀。别的 MCP 客户端：
 
 ```bash
 claude mcp add --transport http magpie-ssh http://127.0.0.1:3425/mcp/magpie/tools/magpie-ssh
