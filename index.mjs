@@ -4,6 +4,7 @@
 import {
 	clampChars,
 	DEFAULT_MAX_CHARS,
+	execBatch,
 	execRemote,
 	expandHome,
 	pickHost,
@@ -41,11 +42,14 @@ export const MagpieSsh = async (_input, options) => {
 
 			run: {
 				description:
-					"在已配置的 SSH 主机上执行一条命令，返回退出码与输出。命令由远端 shell 解释。",
+					"在已配置的 SSH 主机上执行一条命令，返回退出码与输出。命令由远端 shell 解释。host 传 * 表示所有主机并发执行（共享同一份时间预算）。",
 				args: {
 					type: "object",
 					properties: {
-						host: { type: "string", description: "主机名（页面里填的名称）" },
+						host: {
+							type: "string",
+							description: "主机名（页面里填的名称），或 * 表示所有主机",
+						},
 						command: { type: "string", description: "要执行的命令" },
 						timeoutMs: {
 							type: "number",
@@ -59,16 +63,27 @@ export const MagpieSsh = async (_input, options) => {
 					required: ["host", "command"],
 				},
 				async execute(args = {}, ctx) {
-					const picked = pickHost(hosts(), args.host);
-					if (picked.error) return picked.error;
 					if (!args.command) return "需要用 command 给出要执行的命令。";
+					const timeoutMs = Math.min(
+						Number(args.timeoutMs) || TOOL_BUDGET_MS,
+						50000,
+					);
+					const maxChars = clampChars(args.maxChars);
 					try {
+						if (args.host === "*" || args.host === "all") {
+							const all = hosts();
+							if (!all.length) return "还没有配置任何主机。";
+							return await execBatch(all, args.command, {
+								timeoutMs,
+								maxChars,
+								signal: ctx?.abort,
+							});
+						}
+						const picked = pickHost(hosts(), args.host);
+						if (picked.error) return picked.error;
 						return await execRemote(picked.host, args.command, {
-							timeoutMs: Math.min(
-								Number(args.timeoutMs) || TOOL_BUDGET_MS,
-								50000,
-							),
-							maxChars: clampChars(args.maxChars),
+							timeoutMs,
+							maxChars,
 							signal: ctx?.abort,
 						});
 					} catch (error) {

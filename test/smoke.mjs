@@ -8,6 +8,7 @@ import {
 	connectConfig,
 	hostIds,
 	keyType,
+	makeSink,
 	pickHost,
 	readHosts,
 	verifyHostKey,
@@ -134,7 +135,14 @@ assert.match(
 	await plugin.tool.hosts.execute(),
 	/- prod {2}root@10\.0\.0\.5:2222 {2}密码/,
 );
-assert.match(await plugin.tool.run.execute({}), /没有叫 undefined 的主机/);
+assert.match(
+	await plugin.tool.run.execute({}),
+	/需要用 command 给出要执行的命令/,
+);
+assert.match(
+	await plugin.tool.run.execute({ host: "nope", command: "ls" }),
+	/没有叫 nope 的主机/,
+);
 assert.match(
 	await plugin.tool.run.execute({ host: "prod" }),
 	/需要用 command 给出要执行的命令/,
@@ -151,6 +159,17 @@ assert.match(await bare.tool.get.execute({}), /还没有配置 SSH 主机/);
 assert.match(
 	await bare.tool.get.execute({ host: "prod", remote: "/a", local: "/b" }),
 	/还没有配置 SSH 主机/,
+);
+const sink = makeSink(10);
+assert.equal(sink.push(Buffer.from("1234")), true);
+assert.equal(sink.push(Buffer.from("1234")), true);
+assert.equal(sink.push(Buffer.from("1234")), false);
+assert.equal(sink.truncated, true);
+assert.equal(sink.push(Buffer.from("1")), false);
+
+assert.match(
+	await bare.tool.run.execute({ host: "*", command: "uname -a" }),
+	/还没有配置任何主机/,
 );
 
 console.log("smoke ok");

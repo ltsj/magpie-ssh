@@ -10,6 +10,26 @@ export const TOOL_BUDGET_MS = 45000;
 const MAX_COLLECT_BYTES = 4 * 1024 * 1024;
 export const DEFAULT_MAX_CHARS = 16000;
 
+// 输出上限只丢内容、不断连接：命令照常跑完，调用方拿到截断标记。
+export const makeSink = (cap = MAX_COLLECT_BYTES) => {
+	let total = 0;
+	let truncated = false;
+	return {
+		push(chunk) {
+			if (truncated) return false;
+			if (total + chunk.length > cap) {
+				truncated = true;
+				return false;
+			}
+			total += chunk.length;
+			return true;
+		},
+		get truncated() {
+			return truncated;
+		},
+	};
+};
+
 const pluginsJson = () =>
 	join(
 		process.env.XDG_CONFIG_HOME || join(homedir(), ".config"),
@@ -213,11 +233,11 @@ export async function execRemote(
 	const left = () => Math.max(deadline - Date.now(), 1000);
 	const client = await connect(host, { timeoutMs: left(), signal });
 	try {
+		const sink = makeSink(MAX_COLLECT_BYTES);
 		const result = await new Promise((resolve) => {
 			const output = [];
 			const error = [];
 
-			let collected = 0;
 			let aborted = false;
 			const finish = (code) => {
 				resolve({
@@ -243,14 +263,8 @@ export async function execRemote(
 					});
 					return;
 				}
-				const collect = (sink) => (chunk) => {
-					collected += chunk.length;
-					if (collected > MAX_COLLECT_BYTES) {
-						aborted = true;
-						client.end();
-						return;
-					}
-					sink.push(chunk);
+				const collect = (target) => (chunk) => {
+					if (sink.push(chunk)) target.push(chunk);
 				};
 				stream.on("data", collect(output));
 				stream.stderr.on("data", collect(error));
@@ -260,10 +274,43 @@ export async function execRemote(
 				});
 			});
 		});
+		if (sink.truncated)
+			result.note = "[输出超过 4MB，已丢弃后续内容，命令继续执行]";
 		return render(result, clampChars(maxChars));
 	} finally {
 		client.end();
 	}
+}
+
+// 一次命令打多台主机：并发跑，共享同一份时间预算，结果按主机分段。
+export async function execBatch(
+	hosts,
+	command,
+	{ timeoutMs = TOOL_BUDGET_MS, maxChars, signal, concurrency = 4 } = {},
+) {
+	const deadline = Date.now() + timeoutMs;
+	const left = () => Math.max(deadline - Date.now(), 1000);
+	const out = new Array(hosts.length);
+	let next = 0;
+	const worker = async () => {
+		while (next < hosts.length) {
+			const index = next++;
+			out[index] = await execRemote(hosts[index], command, {
+				timeoutMs: left(),
+				maxChars,
+				signal,
+			});
+		}
+	};
+	await Promise.all(
+		Array.from({ length: Math.min(concurrency, hosts.length) }, worker),
+	);
+	return hosts
+		.map(
+			(host, index) =>
+				`== ${host.name || host.host} (${host.user || "root"}@${host.host}:${host.port || 22}) ==\n${out[index]}`,
+		)
+		.join("\n\n");
 }
 
 export async function transferRemote(
@@ -304,6 +351,7 @@ export async function transferRemote(
 export function render(result, maxChars) {
 	const parts = [`exit ${result.code}`];
 	if (result.aborted) parts[0] += "（已超时或输出过大，连接被断开）";
+	if (result.note) parts.splice(1, 0, result.note);
 	if (result.stdout) parts.push(result.stdout);
 	if (result.stderr) parts.push(`[stderr]\n${result.stderr}`);
 	const text = parts.join("\n").trimEnd();

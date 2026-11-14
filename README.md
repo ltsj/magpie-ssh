@@ -24,17 +24,17 @@ magpie plugin add magpie-ssh                              # 从 npm 装会自动
 | 工具 | 参数 | 作用 |
 | --- | --- | --- |
 | `magpie-ssh_hosts` | 无 | 列出主机（名称、地址、认证方式，不含凭据） |
-| `magpie-ssh_run` | `host`, `command`, `timeoutMs?`, `maxChars?` | 执行一条命令，回退出码和输出 |
+| `magpie-ssh_run` | `host`, `command`, `timeoutMs?`, `maxChars?` | 执行一条命令，回退出码和输出；`host` 传 `*` 打全部主机 |
 | `magpie-ssh_put` | `host`, `local`, `remote` | SFTP 上传 |
 | `magpie-ssh_get` | `host`, `remote`, `local` | SFTP 下载 |
 
-`host` 填名称或地址都行。工具一律用文本报错，不抛异常——magpie 加载插件时会拿空参数探一次每个工具，抛异常会把整个插件标成失败。
+单次调用有**一份**时间预算：连接花掉的时间从执行时间里扣。`run` 默认 45 秒、最多 50 秒（magpie 每个工具给 55 秒），`put`/`get` 固定 45 秒。
 
-单次调用有**一份**时间预算：连接花掉的时间从执行时间里扣。`run` 默认 45 秒、最多 50 秒（magpie 每个工具给 55 秒），`put`/`get` 固定 45 秒。输出默认截断到 16000 字符。
+`host` 填名称或地址都行，`*`（或 `all`）表示全部主机并发执行，结果按 `== 名称 (user@host:port) ==` 分段，整体共享一份时间预算。
 
-## 认证与主机指纹
+工具一律用文本报错，不抛异常——magpie 加载插件时会拿空参数探一次每个工具，抛异常会把整个插件标成失败。
 
-主机记录里 `password`、`identityFile` 二选一，都没有就用 ssh agent（`SSH_AUTH_SOCK`，Windows 上默认管道 `\\.\pipe\openssh-ssh-agent`）。`identityFile` 里的 `~` 会展开。
+输出先攒到 4MB，超出只丢内容、不掐连接（命令照常跑完，开头会标注「已丢弃后续内容」）；回给 agent 的文本再按 `maxChars`（默认 16000）截断。
 
 `strictHostKeyChecking`：
 
