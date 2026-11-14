@@ -65,7 +65,7 @@ claude mcp add --transport http magpie-ssh http://127.0.0.1:3425/mcp/magpie/tool
 
 ## 认证与主机指纹
 
-主机记录里 `password`、`identityFile` 二选一，都没有就用 ssh agent（`SSH_AUTH_SOCK`，Windows 上默认管道 `\\.\pipe\openssh-ssh-agent`）。`identityFile` 和 `put`/`get` 的 `local` 里 `~` 会展开。
+主机记录里 `password`、`identityFile` 二选一，都没有就用 ssh agent（`SSH_AUTH_SOCK`，Windows 上默认管道 `\\.\pipe\openssh-ssh-agent`）。`identityFile` 和 `put`/`get` 的 `local` 里 `~` 会展开；`put`/`get` 的远端路径写 `~/x` 会按远端 home 展开（SFTP 自己不做这件事），和 `run` 里 `~` 由远端 shell 展开的效果一致。
 
 `strictHostKeyChecking`：
 
@@ -75,7 +75,7 @@ claude mcp add --transport http magpie-ssh http://127.0.0.1:3425/mcp/magpie/tool
 | `yes` | 必须在 `known_hosts` 里且一致，否则拒绝并说明 |
 | 空（「交给 ssh 默认」） | 放行，不落盘、不校验 |
 
-指纹比的是公钥本身，不是 `known_hosts` 的哈希行——被 `ssh-keygen -H` 哈希过的条目会被当成「没有记录」。指纹变了的时候，确认机器没换过再删掉 `known_hosts` 里那一行。
+指纹按「规范身份」比：22 端口就是主机名，其他端口是 `[host]:port`——所以同一台机器的 22 端口有记录，不会让你连 2222 端口时被误报成「指纹变了」。`known_hosts` 的哈希行（`|1|salt|hmac`，Linux 上 `HashKnownHosts` 默认会写）能正确复算匹配；`@revoked` 命中直接拒绝。不支持的：`*.example.com` 这类通配条目、证书主机（`@cert-authority`）——遇到这类行按「没有记录」处理，`accept-new` 会补一行明文记录，`yes` 会让先用密码/私钥连一次。指纹真变了的时候，确认机器没换过再删掉 `known_hosts` 里那一行。
 
 ## 安全边界
 

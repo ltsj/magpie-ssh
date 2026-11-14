@@ -1,6 +1,7 @@
 // 只测纯逻辑：读 plugins.json、连接配置、known_hosts 指纹判断、工具在坏参数下回文本而不抛。
 // 真连接不在这里测（要真主机和凭据）。
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import {
 	existsSync,
 	mkdirSync,
@@ -21,6 +22,7 @@ import {
 	pickHost,
 	pickHosts,
 	readHosts,
+	remotePath,
 	render,
 	verifyHostKey,
 } from "../lib.mjs";
@@ -123,6 +125,57 @@ const other = Buffer.concat([blob, Buffer.from([9])]);
 const mismatch = verifyHostKey(unknown, other, "accept-new", known);
 assert.equal(mismatch.ok, false);
 assert.match(mismatch.error, /指纹和 known_hosts 里的不一样/);
+
+// 同主机 22 端口的条目不能拿来判 2222 端口「指纹变了」：那是没记录过，不是变了
+const portFile = join(home, "known_ports");
+writeFileSync(portFile, `10.0.0.5 ssh-ed25519 ${blob.toString("base64")}\n`);
+const otherPort = verifyHostKey(
+	{ host: "10.0.0.5", port: 2222 },
+	Buffer.concat([blob, Buffer.from([7])]),
+	"yes",
+	portFile,
+);
+assert.match(otherPort.error, /known_hosts 里没有 \[10\.0\.0\.5\]:2222/);
+assert.doesNotMatch(otherPort.error, /指纹和 known_hosts 里的不一样/);
+
+// 哈希形式的条目（|1|salt|hmac，Linux 上 HashKnownHosts 默认会写这种）
+const hashFile = join(home, "known_hashed");
+const salt = Buffer.from("0123456789abcdef");
+const mac = createHmac("sha1", salt).update("10.0.0.5").digest("base64");
+writeFileSync(
+	hashFile,
+	`|1|${salt.toString("base64")}|${mac} ssh-ed25519 ${blob.toString("base64")}\n`,
+);
+assert.equal(
+	verifyHostKey({ host: "10.0.0.5" }, blob, "yes", hashFile).ok,
+	true,
+);
+
+// @revoked 必须拒绝；@cert-authority 认识不了，跳过而不是当噪音命中
+const markerFile = join(home, "known_markers");
+writeFileSync(
+	markerFile,
+	`@revoked 10.0.0.5 ssh-ed25519 ${blob.toString("base64")}\n@cert-authority *.lan ssh-ed25519 AAAA\n`,
+);
+const revoked = verifyHostKey(
+	{ host: "10.0.0.5" },
+	blob,
+	"accept-new",
+	markerFile,
+);
+assert.equal(revoked.ok, false);
+assert.match(revoked.error, /@revoked/);
+assert.equal(
+	verifyHostKey({ host: "10.0.0.5" }, blob, "yes", markerFile).ok,
+	false,
+);
+
+// SFTP 不认 ~：客户端要自己按远端 home 展开，run 里的 ~ 由远端 shell 展开
+assert.equal(remotePath("~/a/b", "/home/pi"), "/home/pi/a/b");
+assert.equal(remotePath("~/a", "/home/pi/"), "/home/pi/a");
+assert.equal(remotePath("/etc/passwd", "/home/pi"), "/etc/passwd");
+assert.equal(remotePath("rel.txt", "/home/pi"), "rel.txt");
+assert.equal(remotePath("~/a", null), "~/a");
 
 // 找主机：按名称、按主机名；找不到时给出原因
 assert.equal(pickHost([host], "prod").host.id, "a1");

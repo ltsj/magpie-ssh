@@ -1,5 +1,5 @@
 // 辅助函数放在这里，不放进 index.mjs：magpie 会把入口模块导出的每个函数都当插件工厂调用一次。
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -144,6 +144,7 @@ export function keyType(blob) {
 export const fingerprint = (blob) =>
 	`SHA256:${createHash("sha256").update(blob).digest("base64").replace(/=+$/, "")}`;
 
+// 一条已知主机条目：hosts 可能是明文、逗号分隔的多个，也可能是 |1|salt|hash 形式的哈希。
 export function readKnownHosts(file = knownHostsFile()) {
 	let text;
 	try {
@@ -155,28 +156,45 @@ export function readKnownHosts(file = knownHostsFile()) {
 	for (const line of text.split(/\r?\n/)) {
 		const trimmed = line.trim();
 		if (!trimmed || trimmed.startsWith("#")) continue;
-		const [hosts, , blob] = trimmed.split(/\s+/);
+		const fields = trimmed.split(/\s+/);
+		// @cert-authority 需要验证证书链，这里做不到，跳过；@revoked 要当拒绝处理
+		let marker = null;
+		if (fields[0]?.startsWith("@")) marker = fields.shift();
+		const [hosts, , blob] = fields;
 		if (!hosts || !blob) continue;
-		entries.push({ hosts: hosts.split(","), blob });
+		entries.push({ marker, hosts: hosts.split(","), blob });
 	}
 	return entries;
 }
 
+// 条目是否覆盖这个身份：明文直接比，哈希形式按 |1|salt|hmac 复算。
+const coversHost = (entry, id) =>
+	entry.hosts.some((pattern) => {
+		if (!pattern.startsWith("|1|")) return pattern === id;
+		const [, , salt, hash] = pattern.split("|");
+		if (!salt || !hash) return false;
+		const mac = createHmac("sha1", Buffer.from(salt, "base64"))
+			.update(id)
+			.digest("base64");
+		return mac === hash;
+	});
+
 // accept-new：没记录就写进 known_hosts；记录在但指纹不一样就拒绝。
 // yes：必须在 known_hosts 里且一致。不写：直接放行，不落盘。
+// 只认规范身份：22 端口用主机名，其他端口用 [host]:port——否则同主机别的端口会被误判成指纹变了。
 export function verifyHostKey(host, blob, mode, file = knownHostsFile()) {
 	const base64 = blob.toString("base64");
-	const ids = hostIds(host);
-	const entries = readKnownHosts(file);
-	const hit = entries.find(
-		(entry) =>
-			entry.blob === base64 && ids.some((id) => entry.hosts.includes(id)),
-	);
-	if (hit) return { ok: true };
-	const seen = entries.some((entry) =>
-		ids.some((id) => entry.hosts.includes(id)),
-	);
-	if (seen) {
+	const id = hostIds(host).at(-1);
+	const entries = readKnownHosts(file).filter((entry) => coversHost(entry, id));
+	if (entries.some((entry) => entry.blob === base64)) {
+		if (entries.some((entry) => entry.marker === "@revoked"))
+			return {
+				ok: false,
+				error: `known_hosts 把 ${id} 的这把钥匙标成了吊销（@revoked），拒绝连接。`,
+			};
+		return { ok: true };
+	}
+	if (entries.length) {
 		return {
 			ok: false,
 			error: `主机 ${host.host} 的指纹和 known_hosts 里的不一样，可能是换了机器或中间人。确认无误后删掉 known_hosts 里对应那一行再说。`,
@@ -185,16 +203,13 @@ export function verifyHostKey(host, blob, mode, file = knownHostsFile()) {
 	if (mode === "yes") {
 		return {
 			ok: false,
-			error: `known_hosts 里没有 ${host.host}，而指纹校验设成了 yes。先用 ssh 连一次，或在页面里把校验改成 accept-new。`,
+			error: `known_hosts 里没有 ${id}，而指纹校验设成了 yes。先用 ssh 连一次，或在页面里把校验改成 accept-new。`,
 		};
 	}
 	if (mode === "accept-new") {
 		try {
 			mkdirSync(dirname(file), { recursive: true });
-			appendFileSync(
-				file,
-				`${hostIds(host).at(-1)} ${keyType(blob)} ${base64}\n`,
-			);
+			appendFileSync(file, `${id} ${keyType(blob)} ${base64}\n`);
 		} catch {
 			// 写不进去不影响本次连接
 		}
@@ -389,6 +404,14 @@ export async function execBatch(
 	return `${body}\n\n${summary}`;
 }
 
+// SFTP 不展开 ~（那是客户端的事），run 里的 ~ 由远端 shell 展开，两边行为要一致。
+export const remotePath = (value, home) => {
+	const text = String(value ?? "");
+	if (!text.startsWith("~/")) return text;
+	if (!home) return text;
+	return `${String(home).replace(/\/+$/, "")}/${text.slice(2)}`;
+};
+
 export async function transferRemote(
 	host,
 	local,
@@ -403,6 +426,11 @@ export async function transferRemote(
 		const sftp = await new Promise((resolve, reject) => {
 			client.sftp((err, sftp) => (err ? reject(err) : resolve(sftp)));
 		});
+		const home = await new Promise((resolve) => {
+			if (!String(remote).startsWith("~/")) return resolve(null);
+			sftp.realpath(".", (err, dir) => resolve(err ? null : dir));
+		});
+		const path = remotePath(remote, home);
 		return await new Promise((resolve) => {
 			const timer = setTimeout(() => {
 				client.end();
@@ -413,11 +441,11 @@ export async function transferRemote(
 				resolve(
 					err
 						? `exit -1\n[stderr]\n${err.message}`
-						: `exit 0\n${direction === "put" ? `${local} → ${remote}` : `${remote} → ${local}`}`,
+						: `exit 0\n${direction === "put" ? `${local} → ${path}` : `${path} → ${local}`}`,
 				);
 			};
-			if (direction === "put") sftp.fastPut(local, remote, done);
-			else sftp.fastGet(remote, local, done);
+			if (direction === "put") sftp.fastPut(local, path, done);
+			else sftp.fastGet(path, local, done);
 		});
 	} finally {
 		client.end();
