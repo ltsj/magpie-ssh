@@ -11,6 +11,7 @@ import {
 	makeSink,
 	pickHost,
 	readHosts,
+	render,
 	verifyHostKey,
 } from "../lib.mjs";
 import * as entry from "../index.mjs";
@@ -177,4 +178,17 @@ assert.match(
 	/还没有配置任何主机/,
 );
 
+// 超时只报断连；输出超限只丢内容并注记，两者不能互相假扮
+assert.match(
+	render({ code: -1, aborted: true, stdout: "", stderr: "" }, 100),
+	/^exit -1（已超时，连接被断开）$/,
+);
+assert.match(
+	render(
+		{ code: 0, aborted: false, note: "[note]", stdout: "x", stderr: "" },
+		100,
+	),
+	/^exit 0\n\[note\]\nx$/,
+);
+assert.match(render({ code: 0, stdout: "abcdef", stderr: "e" }, 3), /截断/);
 console.log("smoke ok");

@@ -365,7 +365,7 @@ export async function reach(host, { timeoutMs = 8000, signal } = {}) {
 
 export function render(result, maxChars) {
 	const parts = [`exit ${result.code}`];
-	if (result.aborted) parts[0] += "（已超时或输出过大，连接被断开）";
+	if (result.aborted) parts[0] += "（已超时，连接被断开）";
 	if (result.note) parts.splice(1, 0, result.note);
 	if (result.stdout) parts.push(result.stdout);
 	if (result.stderr) parts.push(`[stderr]\n${result.stderr}`);
