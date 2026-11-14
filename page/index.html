@@ -11,7 +11,7 @@
 
 <body>
   <h1>SSH 主机</h1>
-  <p class="lead">主机连同私钥路径存在插件自己的设置里，agent 通过工具 <code>ssh.run</code> 调用，不经过这里。</p>
+  <p class="lead">主机和凭据存在插件自己的设置里（<code>plugins.json</code>，明文），agent 通过 <code>magpie-ssh_run</code> 等工具调用，不经过这里。</p>
 
   <form id="form" autocomplete="off">
     <div class="grid">
@@ -19,6 +19,7 @@
       <label>主机<input id="f-host" placeholder="1.2.3.4 或 example.com" required></label>
       <label>端口<input id="f-port" type="number" min="1" max="65535" placeholder="22"></label>
       <label>用户<input id="f-user" placeholder="root"></label>
+      <label class="wide">密码（留空用私钥或 ssh agent）<input id="f-pw" type="password" autocomplete="new-password"></label>
       <label class="wide">私钥（留空用 ssh agent / ~/.ssh 里的默认身份）<input id="f-key" placeholder="~/.ssh/id_ed25519"></label>
       <label>主机指纹校验
         <select id="f-strict">

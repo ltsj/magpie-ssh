@@ -4,13 +4,11 @@
 import {
 	clampChars,
 	DEFAULT_MAX_CHARS,
+	execRemote,
 	expandHome,
 	pickHost,
 	readHosts,
-	render,
-	run,
-	scpArgs,
-	sshArgs,
+	transferRemote,
 	TOOL_BUDGET_MS,
 } from "./lib.mjs";
 
@@ -20,7 +18,8 @@ export const MagpieSsh = async (_input, options) => {
 	return {
 		tool: {
 			hosts: {
-				description: "列出 magpie 里配置的 SSH 主机（不含任何凭据）。",
+				description:
+					"列出 magpie 里配置的 SSH 主机（名称、地址、认证方式，不含任何凭据）。",
 				args: { type: "object", properties: {} },
 				async execute() {
 					const list = hosts();
@@ -29,7 +28,12 @@ export const MagpieSsh = async (_input, options) => {
 					return list
 						.map((host) => {
 							const target = `${host.user ? `${host.user}@` : ""}${host.host}:${host.port || 22}`;
-							return `- ${host.name}  ${target}${host.note ? `  ${host.note}` : ""}`;
+							const auth = host.password
+								? "密码"
+								: host.identityFile
+									? `私钥 ${host.identityFile}`
+									: "ssh agent";
+							return `- ${host.name}  ${target}  ${auth}${host.note ? `  ${host.note}` : ""}`;
 						})
 						.join("\n");
 				},
@@ -37,7 +41,7 @@ export const MagpieSsh = async (_input, options) => {
 
 			run: {
 				description:
-					"在已配置的 SSH 主机上通过系统 ssh 执行一条命令，返回退出码与输出。命令由远端 shell 解释。",
+					"在已配置的 SSH 主机上执行一条命令，返回退出码与输出。命令由远端 shell 解释。",
 				args: {
 					type: "object",
 					properties: {
@@ -58,24 +62,23 @@ export const MagpieSsh = async (_input, options) => {
 					const picked = pickHost(hosts(), args.host);
 					if (picked.error) return picked.error;
 					if (!args.command) return "需要用 command 给出要执行的命令。";
-					const timeoutMs = Math.min(
-						Number(args.timeoutMs) || TOOL_BUDGET_MS,
-						50000,
-					);
-					const result = await run(
-						"ssh",
-						sshArgs(picked.host, [String(args.command)]),
-						{
-							timeoutMs,
-							signal: ctx?.abort ? ctx.abort : undefined,
-						},
-					);
-					return render(result, clampChars(args.maxChars));
+					try {
+						return await execRemote(picked.host, args.command, {
+							timeoutMs: Math.min(
+								Number(args.timeoutMs) || TOOL_BUDGET_MS,
+								50000,
+							),
+							maxChars: clampChars(args.maxChars),
+							signal: ctx?.abort,
+						});
+					} catch (error) {
+						return `exit -1\n[stderr]\n${error.message}`;
+					}
 				},
 			},
 
 			put: {
-				description: "把本机文件传到已配置的主机上（scp）。",
+				description: "把本机文件传到已配置的主机上（SFTP）。",
 				args: {
 					type: "object",
 					properties: {
@@ -90,20 +93,22 @@ export const MagpieSsh = async (_input, options) => {
 					if (picked.error) return picked.error;
 					if (!args.local || !args.remote)
 						return "需要 local、remote 两个路径。";
-					const result = await run(
-						"scp",
-						scpArgs(picked.host, expandHome(args.local), args.remote, "put"),
-						{
-							timeoutMs: TOOL_BUDGET_MS,
-							signal: ctx?.abort ? ctx.abort : undefined,
-						},
-					);
-					return render(result, DEFAULT_MAX_CHARS);
+					try {
+						return await transferRemote(
+							picked.host,
+							expandHome(args.local),
+							String(args.remote),
+							"put",
+							{ signal: ctx?.abort },
+						);
+					} catch (error) {
+						return `exit -1\n[stderr]\n${error.message}`;
+					}
 				},
 			},
 
 			get: {
-				description: "把已配置主机上的文件取回本机（scp）。",
+				description: "把已配置主机上的文件取回本机（SFTP）。",
 				args: {
 					type: "object",
 					properties: {
@@ -118,15 +123,17 @@ export const MagpieSsh = async (_input, options) => {
 					if (picked.error) return picked.error;
 					if (!args.local || !args.remote)
 						return "需要 remote、local 两个路径。";
-					const result = await run(
-						"scp",
-						scpArgs(picked.host, expandHome(args.local), args.remote, "get"),
-						{
-							timeoutMs: TOOL_BUDGET_MS,
-							signal: ctx?.abort ? ctx.abort : undefined,
-						},
-					);
-					return render(result, DEFAULT_MAX_CHARS);
+					try {
+						return await transferRemote(
+							picked.host,
+							expandHome(args.local),
+							String(args.remote),
+							"get",
+							{ signal: ctx?.abort },
+						);
+					} catch (error) {
+						return `exit -1\n[stderr]\n${error.message}`;
+					}
 				},
 			},
 		},

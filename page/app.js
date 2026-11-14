@@ -5,6 +5,7 @@ const fields = {
 	host: $("f-host"),
 	port: $("f-port"),
 	user: $("f-user"),
+	password: $("f-pw"),
 	identityFile: $("f-key"),
 	strictHostKeyChecking: $("f-strict"),
 	note: $("f-note"),
@@ -36,9 +37,10 @@ function readForm() {
 		user: fields.user.value.trim(),
 		identityFile: fields.identityFile.value.trim(),
 		strictHostKeyChecking: fields.strictHostKeyChecking.value,
+		password: fields.password.value,
 		note: fields.note.value.trim(),
 	};
-	if (!draft.identityFile) delete draft.identityFile;
+	if (!draft.password) delete draft.password;
 	if (!draft.strictHostKeyChecking) delete draft.strictHostKeyChecking;
 	if (!draft.user) delete draft.user;
 	if (!draft.note) delete draft.note;
@@ -51,6 +53,7 @@ function fillForm(host) {
 	fields.port.value = host ? host.port || 22 : "";
 	fields.user.value = host ? host.user || "" : "";
 	fields.identityFile.value = host ? host.identityFile || "" : "";
+	fields.password.value = host ? host.password || "" : "";
 	fields.strictHostKeyChecking.value = host
 		? host.strictHostKeyChecking || ""
 		: "accept-new";
@@ -77,7 +80,8 @@ function render() {
 		const name = document.createElement("strong");
 		name.textContent = host.name;
 		const where = document.createElement("code");
-		where.textContent = target;
+		const auth = host.password ? "  密码" : host.identityFile ? "  私钥" : "";
+		where.textContent = target + auth;
 		main.append(name, where);
 		if (host.note) {
 			const note = document.createElement("span");
