@@ -1,47 +1,47 @@
 {
-	"name": "magpie-ssh",
-	"version": "0.3.1",
-	"description": "SSH hosts in magpie's sidebar, with tools every agent can call",
-	"type": "module",
-	"main": "./index.mjs",
-	"files": [
-		"index.mjs",
-		"lib.mjs",
-		"page",
-		"README.md"
-	],
-	"scripts": {
-		"test": "node test/smoke.mjs"
-	},
-	"keywords": [
-		"magpie",
-		"magpie-plugin",
-		"magpie-page",
-		"magpie-tools",
-		"mcp",
-		"opencode",
-		"ssh"
-	],
-	"magpie": {
-		"page": {
-			"title": "SSH hosts",
-			"file": "page/index.html",
-			"icon": "page/icon.svg",
-			"titles": {
-				"zh": "SSH 主机"
-			}
-		}
-	},
-	"license": "MIT",
-	"dependencies": {
-		"ssh2": "^1.17.0"
-	},
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/ltsj/magpie-ssh.git"
-	},
-	"bugs": {
-		"url": "https://github.com/ltsj/magpie-ssh/issues"
-	},
-	"homepage": "https://github.com/ltsj/magpie-ssh#readme"
+  "name": "magpie-ssh",
+  "version": "0.3.2",
+  "description": "SSH hosts in magpie's sidebar, with tools every agent can call",
+  "type": "module",
+  "main": "./index.mjs",
+  "files": [
+    "index.mjs",
+    "lib.mjs",
+    "page",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/smoke.mjs"
+  },
+  "keywords": [
+    "magpie",
+    "magpie-plugin",
+    "magpie-page",
+    "magpie-tools",
+    "mcp",
+    "opencode",
+    "ssh"
+  ],
+  "magpie": {
+    "page": {
+      "title": "SSH hosts",
+      "file": "page/index.html",
+      "icon": "page/icon.svg",
+      "titles": {
+        "zh": "SSH 主机"
+      }
+    }
+  },
+  "license": "MIT",
+  "dependencies": {
+    "ssh2": "^1.17.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ltsj/magpie-ssh.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ltsj/magpie-ssh/issues"
+  },
+  "homepage": "https://github.com/ltsj/magpie-ssh#readme"
 }

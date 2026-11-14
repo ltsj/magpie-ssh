@@ -58,20 +58,24 @@ export const MagpieSsh = async (_input, options) => {
 					required: ["host"],
 				},
 				async execute(args = {}, ctx) {
-					const list = hosts();
-					if (!list.length) return "还没有配置任何主机。";
-					const timeoutMs = Number(args.timeoutMs) || 8000;
-					if (args.host === "*" || args.host === "all")
-						return (
-							await Promise.all(
-								list.map((host) =>
-									reach(host, { timeoutMs, signal: ctx?.abort }),
-								),
-							)
-						).join("\n");
-					const picked = pickHost(list, args.host);
-					if (picked.error) return picked.error;
-					return reach(picked.host, { timeoutMs, signal: ctx?.abort });
+					try {
+						const list = hosts();
+						if (!list.length) return "还没有配置任何主机。";
+						const timeoutMs = Number(args.timeoutMs) || 8000;
+						if (args.host === "*" || args.host === "all")
+							return (
+								await Promise.all(
+									list.map((host) =>
+										reach(host, { timeoutMs, signal: ctx?.abort }),
+									),
+								)
+							).join("\n");
+						const picked = pickHost(list, args.host);
+						if (picked.error) return picked.error;
+						return await reach(picked.host, { timeoutMs, signal: ctx?.abort });
+					} catch (error) {
+						return `exit -1\n[stderr]\n${error.message}`;
+					}
 				},
 			},
 
