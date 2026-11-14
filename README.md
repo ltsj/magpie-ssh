@@ -7,9 +7,11 @@
 ## 装
 
 ```bash
+magpie plugin add "github:ltsj/magpie-ssh"                # 从 GitHub 装
 magpie plugin add C:/Users/Colorful/Projects/magpie-ssh   # 文件夹装法：先在该目录 pnpm install
-magpie plugin add magpie-ssh                              # 从 npm 装会自动装依赖
 ```
+
+还没发到 npm。文件夹装法用的是仓库工作副本，改完不用重装，`magpie plugin add` 一次（或开关一次插件）让宿主重新加载。
 
 装完重启一次 magpie 应用，工具才会出现在 `/mcp/magpie/tools`：工具表在启动时构建。
 
