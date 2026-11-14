@@ -1,6 +1,6 @@
 {
   "name": "magpie-ssh",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "SSH hosts in magpie's sidebar, with tools every agent can call",
   "type": "module",
   "main": "./index.mjs",
@@ -8,7 +8,8 @@
     "index.mjs",
     "lib.mjs",
     "page",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "test": "node test/smoke.mjs"

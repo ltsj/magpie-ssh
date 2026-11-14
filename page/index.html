@@ -21,6 +21,7 @@
       <label>用户<input id="f-user" placeholder="root"></label>
       <label class="wide">密码（留空用私钥或 ssh agent）<input id="f-pw" type="password" autocomplete="new-password"></label>
       <label class="wide">私钥（留空用 ssh agent / ~/.ssh 里的默认身份）<input id="f-key" placeholder="~/.ssh/id_ed25519"></label>
+      <label class="wide">私钥口令（只有带口令的私钥才填，明文存着）<input id="f-pass" type="password" autocomplete="new-password"></label>
       <label>主机指纹校验
         <select id="f-strict">
           <option value="accept-new">accept-new（首次信任，变了就拒）</option>
@@ -36,6 +37,17 @@
       <span id="status" class="status"></span>
     </div>
   </form>
+
+  <details class="backup">
+    <summary>导入 / 导出</summary>
+    <p class="hint">导出的是主机表原文，<strong>含明文密码和私钥口令</strong>，别贴到会公开的地方。导入按名称合并：同名的覆盖，其余的追加。<code>magpie plugin rm</code> 会删掉设置，删之前先导一份。</p>
+    <textarea id="io" rows="8" spellcheck="false" placeholder="点「导出」把当前主机表填进来；或者把别处的 JSON 粘进来再点「导入」"></textarea>
+    <div class="actions io-actions">
+      <button id="export" type="button">导出</button>
+      <button id="import" type="button">导入</button>
+      <span id="io-status" class="status"></span>
+    </div>
+  </details>
 
   <ul id="list" class="list"></ul>
   <p id="empty" class="empty">还没有主机。</p>

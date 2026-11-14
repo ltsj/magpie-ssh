@@ -1,6 +1,13 @@
 // 辅助函数放在这里，不放进 index.mjs：magpie 会把入口模块导出的每个函数都当插件工厂调用一次。
 import { createHash, createHmac } from "node:crypto";
-import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import {
+	appendFileSync,
+	mkdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	statSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -50,13 +57,36 @@ const isHostsHolder = (options) => Array.isArray(options?.hosts);
 export const knownHostsFile = () => join(homedir(), ".ssh", "known_hosts");
 
 // 页面把主机写在 plugins.json 里这个插件的 options 上；options 参数是宿主启动时的快照，
-// 只能当兜底。
-export function readHosts(fallback) {
-	let db;
+// 只能当兜底。读坏了要报出来：悄悄当空的话，用户会以为主机没了而去重配一遍。
+export function readHostsState(fallback) {
+	let raw = null;
 	try {
-		db = JSON.parse(readFileSync(pluginsJson(), "utf8"));
-	} catch {
-		db = null;
+		raw = readFileSync(pluginsJson(), "utf8");
+	} catch (error) {
+		// 文件不存在 = 还没配过；别的读错误（权限、IO）要让人看见
+		if (error?.code !== "ENOENT")
+			return { hosts: [], error: `读不到 ${pluginsJson()}：${error.message}` };
+	}
+	let db = null;
+	if (raw !== null) {
+		try {
+			db = JSON.parse(raw);
+		} catch (error) {
+			return {
+				hosts: [],
+				error: `${pluginsJson()} 不是合法 JSON（${error.message}），主机列表没读出来；文件里记的主机多半还在，改好这一行再试。`,
+			};
+		}
+		if (!db || typeof db !== "object" || Array.isArray(db))
+			return {
+				hosts: [],
+				error: `${pluginsJson()} 不是 magpie 的插件表（顶层应是 {"plugins":[…]}），主机列表没读出来。`,
+			};
+		if (db.plugins !== undefined && !Array.isArray(db.plugins))
+			return {
+				hosts: [],
+				error: `${pluginsJson()} 里的 plugins 不是数组，主机列表没读出来。`,
+			};
 	}
 	const plugins = db?.plugins ?? [];
 	// 同名插件可能以不同 spec 出现（另一个版本、git 写法），只认真的存了主机的那个。
@@ -69,9 +99,13 @@ export function readHosts(fallback) {
 		holders[0] ??
 		bySpec[0];
 	const hosts = entry?.options?.hosts;
-	if (Array.isArray(hosts)) return hosts;
-	if (isHostsHolder(fallback)) return fallback.hosts;
-	return [];
+	if (Array.isArray(hosts)) return { hosts };
+	if (isHostsHolder(fallback)) return { hosts: fallback.hosts };
+	return { hosts: [] };
+}
+
+export function readHosts(fallback) {
+	return readHostsState(fallback).hosts;
 }
 
 // 工具一律用文本报错：magpie 加载插件时会拿空参数探一次每个工具，抛异常会把整个插件标成失败。
@@ -258,9 +292,12 @@ export function connectConfig(host, { handshake } = {}) {
 	};
 	if (host.user) config.username = String(host.user);
 	if (host.password) config.password = String(host.password);
-	else if (host.identityFile)
+	else if (host.identityFile) {
 		config.privateKey = readPrivateKey(host.identityFile);
-	else if (agentPath()) config.agent = agentPath();
+		// 带口令的私钥：ssh2 解析时要用 passphrase 解密，没有它会报 "Encrypted private
+		// OpenSSH key detected, but no passphrase given" —— 口令当密码用不管事，两种认证走两条路
+		if (host.passphrase) config.passphrase = String(host.passphrase);
+	} else if (agentPath()) config.agent = agentPath();
 	return config;
 }
 
@@ -346,9 +383,16 @@ const closeEntry = (entry) => {
 	force.unref?.();
 };
 
+// 放回一条连接。broken 表示这次调用不能再用它（超时、取消、传输失败）：
+// 减掉自己的引用后，只有整条连接上再没别人时才真的关掉——否则同主机的其他调用会被连坐。
+// 调用方负责先关掉自己那条 channel / SFTP 子系统。
 export const releaseConnection = (entry, { broken = false } = {}) => {
-	if (broken || !entry.pooled) return closeEntry(entry);
+	if (!entry.pooled) return closeEntry(entry);
 	entry.busy = Math.max(entry.busy - 1, 0);
+	if (broken) {
+		if (entry.busy) return undefined;
+		return closeEntry(entry);
+	}
 	if (entry.busy || entry.closed) return undefined;
 	clearTimeout(entry.timer);
 	entry.timer = setTimeout(() => closeEntry(entry), IDLE_MS);
@@ -427,6 +471,8 @@ export async function execOnce(
 			let aborted = false;
 			let reason = null;
 			let settled = false;
+			// 自己这条 channel：超时/取消时只关它，连接留给同主机的其他调用
+			let channel = null;
 			const finish = (code) => {
 				if (settled) return;
 				settled = true;
@@ -437,7 +483,13 @@ export async function execOnce(
 			const stop = (why) => {
 				aborted = true;
 				reason ??= why;
-				// 远端那条命令还在跑：整条连接作废，不留给下一条命令
+				// 远端那条命令可能还在跑：关掉自己这条 channel 就够了，整条连接还能给
+				// 同主机上并发的调用用；作废连接会把它们一起掐断
+				try {
+					channel?.destroy?.();
+				} catch {
+					// 通道已经没了，没什么可关的
+				}
 				handOff(true);
 				finish(-1);
 			};
@@ -454,6 +506,7 @@ export async function execOnce(
 					finish(-1);
 					return;
 				}
+				channel = stream;
 				const collect = (kind, decoder) => (chunk) => {
 					if (sink.push(chunk)) push(kind, decoder.write(chunk));
 				};
@@ -592,7 +645,13 @@ export async function transferRemote(
 		return await new Promise((resolve) => {
 			const timer = setTimeout(() => {
 				broken = true;
-				closeEntry(entry);
+				// 只关自己的 SFTP 子系统：连接上还有别的调用时留给它们，
+				// 整条作废会把同主机上并发的 run 一起掐断
+				try {
+					sftp.end();
+				} catch {
+					// 已经关了
+				}
 				resolve(`exit -1（传输超时，${timeoutMs} 毫秒）`);
 			}, left());
 			const done = (err) => {
@@ -607,7 +666,7 @@ export async function transferRemote(
 			else sftp.fastGet(path, local, done);
 		});
 	} finally {
-		if (!broken) releaseConnection(entry);
+		releaseConnection(entry, { broken });
 	}
 }
 
@@ -680,6 +739,18 @@ export const batchBudget = (maxChars, count) =>
 export const configDir = () =>
 	process.env.XDG_CONFIG_HOME || join(homedir(), ".config", "magpie");
 export const auditFile = () => join(configDir(), "magpie-ssh-audit.log");
+// 日志不能无限长：满了就换一份 .1，只留一代——查「谁跑了什么」看最近的够用
+export const AUDIT_FILE_MAX_BYTES = 2 * 1024 * 1024;
+
+const rotateAudit = (file) => {
+	try {
+		if (statSync(file).size < AUDIT_FILE_MAX_BYTES) return;
+		rmSync(`${file}.1`, { force: true });
+		renameSync(file, `${file}.1`);
+	} catch {
+		// 还没有文件、或者换不动：这次照旧往后追
+	}
+};
 
 // 被内容注入的 agent 能拿 get 覆盖本机凭据、拿 put 把 plugins.json（明文密码）传出去：
 // 只拦这两个目录，其余路径照旧——本地路径就是给人用的。
@@ -688,10 +759,9 @@ export function guardLocal(file, direction) {
 	const fold = (value) =>
 		process.platform === "linux" ? value : value.toLowerCase();
 	const full = fold(resolve(expandHome(file)));
-	const dirs =
-		direction === "get"
-			? [configDir(), join(homedir(), ".ssh")]
-			: [configDir()];
+	// 两个方向都护住凭据目录：get 不许往里写（能把 known_hosts 换成攻击者的），
+	// put 不许往外取（被内容注入的 agent 能把私钥、plugins.json 一起传走）
+	const dirs = [configDir(), join(homedir(), ".ssh")];
 	for (const dir of dirs) {
 		const root = resolve(dir);
 		if (full === fold(root) || full.startsWith(fold(`${root}${sep}`)))
@@ -705,6 +775,7 @@ export function audit(options, record) {
 	try {
 		// 命令原文里可能带凭据：只有本人能读
 		mkdirSync(dirname(auditFile()), { recursive: true, mode: 0o700 });
+		rotateAudit(auditFile());
 		appendFileSync(
 			auditFile(),
 			`${JSON.stringify({ ts: new Date().toISOString(), ...record })}\n`,

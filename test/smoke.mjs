@@ -17,6 +17,7 @@ import {
 	clampChars,
 	closeAllConnections,
 	auditFile,
+	AUDIT_FILE_MAX_BYTES,
 	connectConfig,
 	configDir,
 	fingerprint,
@@ -27,7 +28,9 @@ import {
 	pickHost,
 	pickHosts,
 	readHosts,
+	readHostsState,
 	registerHostKey,
+	releaseConnection,
 	poolKey,
 	poolStats,
 	remotePath,
@@ -120,6 +123,21 @@ assert.throws(
 	/私钥文件不可用/,
 );
 assert.equal(keyed.password, undefined);
+assert.equal(keyed.passphrase, undefined);
+// 带口令的私钥：passphrase 原样交给 ssh2 去解，没它就解不开这把钥匙
+const lockedKey = connectConfig({
+	name: "k",
+	host: "h",
+	identityFile: keyFile,
+	passphrase: "secret",
+});
+assert.equal(lockedKey.passphrase, "secret");
+// 密码认证时口令不该混进来：两条认证路只走一条
+assert.equal(
+	connectConfig({ ...host, identityFile: keyFile, passphrase: "secret" })
+		.passphrase,
+	undefined,
+);
 process.env.SSH_AUTH_SOCK = "\\\\pipe\\test-agent";
 const agented = connectConfig({ name: "a", host: "h" });
 assert.equal(agented.agent, "\\\\pipe\\test-agent");
@@ -372,10 +390,13 @@ assert.equal(batchBudget(1000, 5), 200);
 assert.equal(clampChars(-5), 16000);
 assert.equal(clampChars(Number.NaN), 16000);
 assert.equal(clampChars(1), 200);
-// 本机路径护栏：get 不许往凭据目录写，put 不许从插件设置里取
+// 本机路径护栏：两个方向都护住凭据目录
+// get 不许往里写（能把 known_hosts 或 authorized_keys 换成攻击者的），
+// put 不许往外取（被内容注入的 agent 能把私钥、plugins.json 一起传走）
 // Windows / macOS 上大小写不敏感：.SSH 照样能碰到真目录
 if (process.platform !== "linux") {
 	assert.match(guardLocal(join(home, ".SSH", "id_ed25519"), "get"), /不动/);
+	assert.match(guardLocal(join(home, ".SSH", "id_ed25519"), "put"), /不动/);
 	assert.match(
 		guardLocal(join(home, ".Config", "magpie", "plugins.json"), "put"),
 		/不动/,
@@ -383,10 +404,86 @@ if (process.platform !== "linux") {
 }
 assert.match(guardLocal(join(configDir(), "plugins.json"), "get"), /不动/);
 assert.match(guardLocal(join(home, ".ssh", "authorized_keys"), "get"), /不动/);
+assert.match(guardLocal(join(home, ".ssh", "id_ed25519"), "put"), /不动/);
 assert.match(guardLocal(join(configDir(), "plugins.json"), "put"), /不动/);
 assert.equal(
 	guardLocal(join(tmpdir(), "elsewhere", "id_ed25519"), "put"),
 	null,
 );
 assert.equal(guardLocal(join(tmpdir(), "elsewhere", "a.txt"), "get"), null);
+// plugins.json 读坏了要报出来，不能悄悄当空表：用户会以为主机没了，跑去重配一遍
+const pluginsJson = join(home, "magpie", "plugins.json");
+writeFileSync(pluginsJson, '{ "plugins": [ 少个括号 ');
+const broken = readHostsState(null);
+assert.deepEqual(broken.hosts, []);
+assert.match(broken.error, /不是合法 JSON/);
+// 顶层不是插件表也算坏：数组、字符串都不认
+writeFileSync(pluginsJson, JSON.stringify([host]));
+assert.match(readHostsState(null).error, /不是 magpie 的插件表/);
+// plugins 字段得是数组
+writeFileSync(pluginsJson, JSON.stringify({ plugins: {} }));
+assert.match(readHostsState(null).error, /plugins/);
+// 读得动的时候没有 error，旧接口 readHosts 照旧只给数组
+writePlugins([{ spec: "magpie-ssh", options: { hosts: [host] } }]);
+const good = readHostsState(null);
+assert.equal(good.error, undefined);
+assert.equal(good.hosts[0].name, "prod");
+assert.equal(readHosts(null)[0].name, "prod");
+
+// 复用连接不连坐：一次超时/取消只作废自己那条 channel，
+// 同主机还有别人在用就留着连接；最后一个用坏的才关整条
+const fakeClient = (entry) => ({
+	end() {
+		entry.ended = true;
+	},
+	destroy() {},
+});
+const shared = {
+	key: "root@shared:22|agent",
+	pooled: true,
+	busy: 2,
+	closed: false,
+	client: {},
+};
+shared.client = fakeClient(shared);
+releaseConnection(shared, { broken: true });
+assert.equal(shared.busy, 1);
+assert.equal(shared.ended, undefined, "还有别人在用，不许关连接");
+releaseConnection(shared, { broken: true });
+assert.equal(shared.ended, true, "最后一个用坏的才关整条");
+assert.equal(shared.closed, true);
+
+const idle = {
+	key: "root@idle:22|agent",
+	pooled: true,
+	busy: 1,
+	closed: false,
+	client: {},
+};
+idle.client = fakeClient(idle);
+releaseConnection(idle);
+assert.equal(idle.busy, 0);
+assert.equal(idle.ended, undefined, "正常放回不关连接，等空闲计时");
+assert.ok(idle.timer, "放回后要起空闲计时");
+
+// 不走复用池的连接（reuse:false）用完就关
+const single = {
+	key: "root@once:22|agent",
+	pooled: false,
+	busy: 1,
+	closed: false,
+	client: {},
+};
+single.client = fakeClient(single);
+releaseConnection(single);
+assert.equal(single.ended, true);
+
+// 审计日志太大就转成 .1 再写，只留一代：不然常驻 agent 能把盘写满
+writeFileSync(auditFile(), "x".repeat(AUDIT_FILE_MAX_BYTES));
+audit({ auditLog: true }, { tool: "run", command: "after-rotate" });
+assert.ok(existsSync(`${auditFile()}.1`), "超限的旧日志该转到 .1");
+const rotated = readFileSync(auditFile(), "utf8").trim().split("\n");
+assert.equal(rotated.length, 1);
+assert.equal(JSON.parse(rotated[0]).command, "after-rotate");
+
 console.log("smoke ok");

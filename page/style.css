@@ -36,7 +36,8 @@ label.wide {
 }
 
 input,
-select {
+select,
+textarea {
 	font: inherit;
 	font-size: 13px;
 	padding: 7px 9px;
@@ -51,7 +52,8 @@ select {
 }
 
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
 	outline: 2px solid var(--magpie-accent, Highlight);
 	outline-offset: 1px;
 }
@@ -106,6 +108,40 @@ button.danger {
 .status.bad {
 	color: var(--magpie-danger, #d9534f);
 	opacity: 1;
+}
+
+.backup {
+	margin: 0 0 24px;
+}
+
+.backup summary {
+	cursor: pointer;
+	font-size: 12px;
+	opacity: 0.7;
+}
+
+.backup summary:hover {
+	opacity: 1;
+}
+
+.hint {
+	margin: 8px 0 10px;
+	font-size: 12px;
+	line-height: 1.6;
+	opacity: 0.7;
+}
+
+.backup textarea {
+	box-sizing: border-box;
+	width: 100%;
+	margin-top: 4px;
+	font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+	line-height: 1.45;
+	resize: vertical;
+}
+
+.io-actions {
+	margin: 10px 0 0;
 }
 
 .list {

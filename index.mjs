@@ -11,14 +11,15 @@ import {
 	guardLocal,
 	pickHost,
 	pickHosts,
-	readHosts,
+	readHostsState,
 	reach,
 	transferRemote,
 	TOOL_BUDGET_MS,
 } from "./lib.mjs";
 
 export const MagpieSsh = async (_input, options) => {
-	const hosts = () => readHosts(options);
+	// 读坏了要报出来：悄悄当空的话，用户会以为主机没了而去重配一遍
+	const readState = () => readHostsState(options);
 	// 插件的 connectionReuse: false 可以关掉连接复用（改这个选项会重启宿主）
 	const reuse = options?.connectionReuse !== false;
 
@@ -29,7 +30,8 @@ export const MagpieSsh = async (_input, options) => {
 					"列出 magpie 里配置的 SSH 主机（名称、地址、认证方式，不含任何凭据）。",
 				args: { type: "object", properties: {} },
 				async execute() {
-					const list = hosts();
+					const { hosts: list, error } = readState();
+					if (error) return error;
 					if (!list.length)
 						return "还没有配置 SSH 主机：打开 magpie 侧边栏的「SSH 主机」页添加一台。";
 					return list
@@ -38,7 +40,7 @@ export const MagpieSsh = async (_input, options) => {
 							const auth = host.password
 								? "密码"
 								: host.identityFile
-									? `私钥 ${host.identityFile}`
+									? `私钥 ${host.identityFile}${host.passphrase ? "（带口令）" : ""}`
 									: "ssh agent";
 							return `- ${host.name}  ${target}  ${auth}${host.note ? `  ${host.note}` : ""}`;
 						})
@@ -65,7 +67,9 @@ export const MagpieSsh = async (_input, options) => {
 				async execute(args = {}, ctx) {
 					try {
 						const timeoutMs = Math.min(Number(args.timeoutMs) || 8000, 50000);
-						const picked = pickHosts(hosts(), args.host);
+						const state = readState();
+						if (state.error) return state.error;
+						const picked = pickHosts(state.hosts, args.host);
 						if (picked.error) return picked.error;
 						// 多台时共享同一份预算、最多 8 条并发：几十台一起握手会撞穿 55 秒
 						const list = picked.list;
@@ -128,7 +132,9 @@ export const MagpieSsh = async (_input, options) => {
 					);
 					const maxChars = clampChars(args.maxChars);
 					try {
-						const picked = pickHosts(hosts(), args.host);
+						const state = readState();
+						if (state.error) return state.error;
+						const picked = pickHosts(state.hosts, args.host);
 						if (picked.error) return picked.error;
 						const text =
 							picked.list.length > 1
@@ -158,7 +164,8 @@ export const MagpieSsh = async (_input, options) => {
 			},
 
 			put: {
-				description: "把本机文件传到已配置的主机上（SFTP）。",
+				description:
+					"把本机文件传到已配置的主机上（SFTP），一次一个文件。不从插件设置目录和 ~/.ssh 取文件。",
 				args: {
 					type: "object",
 					properties: {
@@ -169,7 +176,9 @@ export const MagpieSsh = async (_input, options) => {
 					required: ["host", "local", "remote"],
 				},
 				async execute(args = {}, ctx) {
-					const picked = pickHost(hosts(), args.host);
+					const state = readState();
+					if (state.error) return state.error;
+					const picked = pickHost(state.hosts, args.host);
 					if (picked.error) return picked.error;
 					if (!args.local || !args.remote)
 						return "需要 local、remote 两个路径。";
@@ -197,7 +206,8 @@ export const MagpieSsh = async (_input, options) => {
 			},
 
 			get: {
-				description: "把已配置主机上的文件取回本机（SFTP）。",
+				description:
+					"把已配置主机上的文件取回本机（SFTP），一次一个文件。不往插件设置目录和 ~/.ssh 写文件。",
 				args: {
 					type: "object",
 					properties: {
@@ -208,7 +218,9 @@ export const MagpieSsh = async (_input, options) => {
 					required: ["host", "remote", "local"],
 				},
 				async execute(args = {}, ctx) {
-					const picked = pickHost(hosts(), args.host);
+					const state = readState();
+					if (state.error) return state.error;
+					const picked = pickHost(state.hosts, args.host);
 					if (picked.error) return picked.error;
 					if (!args.local || !args.remote)
 						return "需要 remote、local 两个路径。";

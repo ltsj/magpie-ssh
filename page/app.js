@@ -7,6 +7,7 @@ const fields = {
 	user: $("f-user"),
 	password: $("f-pw"),
 	identityFile: $("f-key"),
+	passphrase: $("f-pass"),
 	strictHostKeyChecking: $("f-strict"),
 	note: $("f-note"),
 };
@@ -18,15 +19,18 @@ let armedDelete = null;
 const newId = () =>
 	`${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 
-function flash(message, bad) {
-	const status = $("status");
-	status.textContent = message;
-	status.classList.toggle("bad", Boolean(bad));
-	clearTimeout(flash.timer);
-	flash.timer = setTimeout(() => {
-		status.textContent = "";
-		status.classList.remove("bad");
+function flashInto(element, message, bad) {
+	element.textContent = message;
+	element.classList.toggle("bad", Boolean(bad));
+	clearTimeout(element.timer);
+	element.timer = setTimeout(() => {
+		element.textContent = "";
+		element.classList.remove("bad");
 	}, 4000);
+}
+
+function flash(message, bad) {
+	flashInto($("status"), message, bad);
 }
 
 function readForm() {
@@ -36,11 +40,14 @@ function readForm() {
 		port: Number(fields.port.value) || 22,
 		user: fields.user.value.trim(),
 		identityFile: fields.identityFile.value.trim(),
+		passphrase: fields.passphrase.value,
 		strictHostKeyChecking: fields.strictHostKeyChecking.value,
 		password: fields.password.value,
 		note: fields.note.value.trim(),
 	};
 	if (!draft.identityFile) delete draft.identityFile;
+	// 口令只在有私钥时才有意义：密码认证和 agent 用不上它
+	if (!draft.identityFile || !draft.passphrase) delete draft.passphrase;
 	if (!draft.password) delete draft.password;
 	if (!draft.strictHostKeyChecking) delete draft.strictHostKeyChecking;
 	if (!draft.user) delete draft.user;
@@ -54,6 +61,7 @@ function fillForm(host) {
 	fields.port.value = host ? host.port || 22 : "";
 	fields.user.value = host ? host.user || "" : "";
 	fields.identityFile.value = host ? host.identityFile || "" : "";
+	fields.passphrase.value = host ? host.passphrase || "" : "";
 	fields.password.value = host ? host.password || "" : "";
 	// 老记录没有这个字段：插件按 accept-new 处理，页面也得选在 accept-new 上
 	const strict = host ? host.strictHostKeyChecking : "accept-new";
@@ -89,7 +97,13 @@ function render() {
 		const name = document.createElement("strong");
 		name.textContent = host.name;
 		const where = document.createElement("code");
-		const auth = host.password ? "  密码" : host.identityFile ? "  私钥" : "";
+		const auth = host.password
+			? "  密码"
+			: host.identityFile
+				? host.passphrase
+					? "  私钥+口令"
+					: "  私钥"
+				: "";
 		where.textContent = target + auth;
 		main.append(name, where);
 		if (host.note) {
@@ -178,6 +192,86 @@ $("form").addEventListener("submit", async (event) => {
 });
 
 $("cancel").addEventListener("click", stopEditing);
+
+// 导出 / 导入：沙箱里写不了文件、读不到剪贴板，就用一个文本框当中转站。
+// magpie plugin rm 会把设置一起删掉，删之前先导一份出来。
+// 导出的字段里不放 id：它是这份设置内部的身份，带出去再导回来只会撞车。
+// 按名称合并时，覆盖的沿用原来的 id，新增的现生成。
+const HOST_FIELDS = [
+	"name",
+	"host",
+	"port",
+	"user",
+	"password",
+	"identityFile",
+	"passphrase",
+	"strictHostKeyChecking",
+	"note",
+];
+
+const knownFields = (item) => {
+	const host = {};
+	for (const key of HOST_FIELDS)
+		if (item[key] !== undefined && item[key] !== "") host[key] = item[key];
+	return host;
+};
+
+const looksLikeHost = (item) =>
+	Boolean(item) &&
+	typeof item === "object" &&
+	!Array.isArray(item) &&
+	typeof item.name === "string" &&
+	item.name.trim().length > 0 &&
+	typeof item.host === "string" &&
+	item.host.trim().length > 0;
+
+$("export").addEventListener("click", () => {
+	$("io").value = JSON.stringify(hosts.map(knownFields), null, 2);
+	flashInto($("io-status"), `已导出 ${hosts.length} 台`);
+});
+
+$("import").addEventListener("click", async () => {
+	const status = $("io-status");
+	let parsed;
+	try {
+		parsed = JSON.parse($("io").value);
+	} catch (error) {
+		flashInto(status, `不是合法 JSON：${error.message}`, true);
+		return;
+	}
+	if (!Array.isArray(parsed)) {
+		flashInto(status, "要一个数组，形如 [{name, host, …}, …]", true);
+		return;
+	}
+	const usable = parsed.filter(looksLikeHost).map(knownFields);
+	const skipped = parsed.length - usable.length;
+	if (!usable.length) {
+		flashInto(status, "没有能认出来的主机：每条至少要有 name 和 host", true);
+		return;
+	}
+	// 按名称合并：同名的覆盖（沿用原来的 id），其余的追加
+	const merged = new Map(hosts.map((item) => [item.name.toLowerCase(), item]));
+	let added = 0;
+	let updated = 0;
+	for (const host of usable) {
+		const key = host.name.toLowerCase();
+		const existing = merged.get(key);
+		if (existing) {
+			merged.set(key, { ...host, id: existing.id });
+			updated += 1;
+		} else {
+			merged.set(key, { ...host, id: newId() });
+			added += 1;
+		}
+	}
+	if (await persist([...merged.values()])) {
+		$("io").value = "";
+		flashInto(
+			status,
+			`导入完成：新增 ${added} 台，更新 ${updated} 台${skipped ? `，跳过 ${skipped} 条认不出的` : ""}`,
+		);
+	}
+});
 
 async function main() {
 	await magpie.ready;

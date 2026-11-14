@@ -1,0 +1,7 @@
+# 仓库里一律 LF：Windows 检出也别变成 CRLF，否则 diff 里会冒出「整个文件都改了」。
+* text=auto eol=lf
+
+# 图片按二进制存，别做换行转换
+*.png binary
+*.ico binary
+*.jpg binary

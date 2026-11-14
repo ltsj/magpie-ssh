@@ -1,0 +1,9 @@
+# ssh2 和可选依赖 cpu-features 的原生构建不是必需的（纯 JS 回退可用），
+# 明确禁用：pnpm 10（CI 里的版本）读 ignoredBuiltDependencies，pnpm 11+ 读 allowBuilds。
+# 都不写的话，pnpm 11 起会直接报 ERR_PNPM_IGNORED_BUILDS。
+ignoredBuiltDependencies:
+  - cpu-features
+  - ssh2
+allowBuilds:
+  cpu-features: false
+  ssh2: false
