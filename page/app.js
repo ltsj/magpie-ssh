@@ -40,6 +40,7 @@ function readForm() {
 		password: fields.password.value,
 		note: fields.note.value.trim(),
 	};
+	if (!draft.identityFile) delete draft.identityFile;
 	if (!draft.password) delete draft.password;
 	if (!draft.strictHostKeyChecking) delete draft.strictHostKeyChecking;
 	if (!draft.user) delete draft.user;
