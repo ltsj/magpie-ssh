@@ -3,7 +3,17 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MagpieSsh, pickHost, readHosts, scpArgs, sshArgs } from "../index.mjs";
+import { pickHost, readHosts, scpArgs, sshArgs } from "../lib.mjs";
+import * as entry from "../index.mjs";
+
+// 入口模块只许导出插件工厂：magpie 把导出的每个函数都当工厂调一次，多一个就整个插件失败
+const MagpieSsh = entry.MagpieSsh;
+assert.deepEqual(
+	Object.entries(entry)
+		.filter(([, value]) => typeof value === "function")
+		.map(([name]) => name),
+	["MagpieSsh"],
+);
 
 const home = mkdtempSync(join(tmpdir(), "magpie-ssh-"));
 process.env.XDG_CONFIG_HOME = home;
@@ -111,5 +121,14 @@ assert.match(
 );
 assert.match(await bare.tool.put.execute({}), /还没有配置 SSH 主机/);
 assert.match(await bare.tool.get.execute({}), /还没有配置 SSH 主机/);
+// 下载方向也要真的走 scp 参数（曾经把选项对象当成了 argv）
+assert.match(
+	await bare.tool.get.execute({
+		host: "prod",
+		remote: "/srv/a",
+		local: "/tmp/a",
+	}),
+	/还没有配置 SSH 主机/,
+);
 
 console.log("smoke ok");
