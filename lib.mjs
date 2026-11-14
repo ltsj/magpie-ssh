@@ -348,6 +348,18 @@ export async function transferRemote(
 	}
 }
 
+// 只握手不执行命令：用来分辨「连不上」「认证被拒」「指纹对不上」，并给出握手耗时。
+export async function reach(host, { timeoutMs = 8000, signal } = {}) {
+	const started = Date.now();
+	try {
+		const client = await connect(host, { timeoutMs, signal });
+		client.end();
+		return `exit 0\n${host.name || host.host}  ${Date.now() - started} 毫秒`;
+	} catch (error) {
+		return `exit -1\n[stderr]\n${String(error.message ?? error)}`;
+	}
+}
+
 export function render(result, maxChars) {
 	const parts = [`exit ${result.code}`];
 	if (result.aborted) parts[0] += "（已超时或输出过大，连接被断开）";

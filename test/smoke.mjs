@@ -126,6 +126,7 @@ assert.match(pickHost([], "nope").error, /还没有配置 SSH 主机/);
 writePlugins([{ spec: "magpie-ssh", options: { hosts: [host] } }]);
 const plugin = await MagpieSsh({}, { hosts: [host] });
 assert.deepEqual(Object.keys(plugin.tool).sort(), [
+	"check",
 	"get",
 	"hosts",
 	"put",
@@ -159,6 +160,10 @@ assert.match(await bare.tool.get.execute({}), /还没有配置 SSH 主机/);
 assert.match(
 	await bare.tool.get.execute({ host: "prod", remote: "/a", local: "/b" }),
 	/还没有配置 SSH 主机/,
+);
+assert.match(
+	await bare.tool.check.execute({ host: "*" }),
+	/还没有配置任何主机/,
 );
 const sink = makeSink(10);
 assert.equal(sink.push(Buffer.from("1234")), true);

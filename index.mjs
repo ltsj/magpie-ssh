@@ -9,6 +9,7 @@ import {
 	expandHome,
 	pickHost,
 	readHosts,
+	reach,
 	transferRemote,
 	TOOL_BUDGET_MS,
 } from "./lib.mjs";
@@ -37,6 +38,40 @@ export const MagpieSsh = async (_input, options) => {
 							return `- ${host.name}  ${target}  ${auth}${host.note ? `  ${host.note}` : ""}`;
 						})
 						.join("\n");
+				},
+			},
+			check: {
+				description:
+					"只握手不发命令，报告每台主机能不能连、耗时多少；用来分清「网络不通」「认证被拒」「主机指纹对不上」。host 传 * 表示所有主机。",
+				args: {
+					type: "object",
+					properties: {
+						host: {
+							type: "string",
+							description: "主机名（页面里填的名称），或 * 表示所有主机",
+						},
+						timeoutMs: {
+							type: "number",
+							description: "握手超时毫秒，默认 8000",
+						},
+					},
+					required: ["host"],
+				},
+				async execute(args = {}, ctx) {
+					const list = hosts();
+					if (!list.length) return "还没有配置任何主机。";
+					const timeoutMs = Number(args.timeoutMs) || 8000;
+					if (args.host === "*" || args.host === "all")
+						return (
+							await Promise.all(
+								list.map((host) =>
+									reach(host, { timeoutMs, signal: ctx?.abort }),
+								),
+							)
+						).join("\n");
+					const picked = pickHost(list, args.host);
+					if (picked.error) return picked.error;
+					return reach(picked.host, { timeoutMs, signal: ctx?.abort });
 				},
 			},
 

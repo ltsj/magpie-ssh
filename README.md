@@ -1,6 +1,6 @@
 # magpie-ssh
 
-在 magpie 侧边栏里管理 SSH 主机，并把这些主机交给所有 agent 用：插件注册 `run`、`put`、`get`、`hosts` 四个工具，magpie 汇成自己的 MCP 服务器 `/mcp/magpie/tools`。
+在 magpie 侧边栏里管理 SSH 主机，并把这些主机交给所有 agent 用：插件注册 `run`、`put`、`get`、`check`、`hosts` 五个工具，magpie 汇成自己的 MCP 服务器 `/mcp/magpie/tools`。
 
 连的是 `ssh2`（纯 JS，不依赖系统 ssh），支持三种认证：密码、私钥、ssh agent。主机和凭据只存一份，在 magpie 的 `plugins.json` 里这个插件的 `options.hosts` 上；工具每次调用重新读一遍，页面里改了立刻生效。
 
@@ -15,6 +15,14 @@ magpie plugin add C:/Users/Colorful/Projects/magpie-ssh   # 文件夹装法：�
 
 装完重启一次 magpie 应用，工具才会出现在 `/mcp/magpie/tools`：工具表在启动时构建。
 
+## 更新
+
+```bash
+magpie plugin update magpie-ssh
+```
+
+仓库是公开的，改完推上去再跑这条就拿到新版本；版本号没变也能强制重装（重新拉取）。
+
 ## 页面
 
 侧边栏「插件」分组里的 **SSH 主机**：名称、主机、端口、用户、密码（或私钥路径）、主机指纹校验、备注，点添加。行内可编辑、可删除（删除要点两次）。
@@ -26,6 +34,7 @@ magpie plugin add C:/Users/Colorful/Projects/magpie-ssh   # 文件夹装法：�
 | 工具 | 参数 | 作用 |
 | --- | --- | --- |
 | `magpie-ssh_hosts` | 无 | 列出主机（名称、地址、认证方式，不含凭据） |
+| `magpie-ssh_check` | `host`, `timeoutMs?` | 只握手不发命令，报每台能不能连、耗时多少 |
 | `magpie-ssh_run` | `host`, `command`, `timeoutMs?`, `maxChars?` | 执行一条命令，回退出码和输出；`host` 传 `*` 打全部主机 |
 | `magpie-ssh_put` | `host`, `local`, `remote` | SFTP 上传 |
 | `magpie-ssh_get` | `host`, `remote`, `local` | SFTP 下载 |
