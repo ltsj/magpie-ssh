@@ -289,7 +289,7 @@ export async function execRemote(
 export async function execBatch(
 	hosts,
 	command,
-	{ timeoutMs = TOOL_BUDGET_MS, maxChars, signal, concurrency = 4 } = {},
+	{ timeoutMs = TOOL_BUDGET_MS, maxChars, signal, concurrency = 8 } = {},
 ) {
 	const deadline = Date.now() + timeoutMs;
 	const left = () => Math.max(deadline - Date.now(), 1000);
