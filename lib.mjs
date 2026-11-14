@@ -4,12 +4,13 @@ import {
 	appendFileSync,
 	mkdirSync,
 	readFileSync,
+	readdirSync,
 	renameSync,
 	rmSync,
 	statSync,
 } from "node:fs";
 import { homedir, userInfo } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, posix, resolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { Client } from "ssh2";
 
@@ -878,6 +879,285 @@ export const remotePath = (value, home) => {
 	return `${String(home).replace(/\/+$/, "")}/${text.slice(2)}`;
 };
 
+// ---- 递归传输：目录先走一遍再逐个文件传，符号链接和特殊文件不跟 ----
+
+const humanSize = (bytes) => {
+	if (bytes < 1024) return `${bytes} B`;
+	const units = ["KB", "MB", "GB", "TB"];
+	let value = bytes / 1024;
+	let unit = 0;
+	while (value >= 1024 && unit < units.length - 1) {
+		value /= 1024;
+		unit += 1;
+	}
+	return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}`;
+};
+
+// 本机目录里的普通文件；符号链接不跟（可能指到 /etc、盘符根目录甚至网络路径），
+// 设备文件、管道之类也跳过。排好序，测试和输出都稳定。
+export function walkLocalTree(root) {
+	const files = [];
+	const links = [];
+	const stack = [""];
+	while (stack.length) {
+		const rel = stack.pop();
+		const dir = rel ? join(root, rel) : root;
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			const child = rel ? `${rel}/${entry.name}` : entry.name;
+			if (entry.isSymbolicLink()) {
+				links.push(child);
+				continue;
+			}
+			if (entry.isDirectory()) {
+				stack.push(child);
+				continue;
+			}
+			if (!entry.isFile()) continue;
+			let size = 0;
+			try {
+				size = statSync(join(root, child)).size;
+			} catch {
+				// 读不到大小也照传，按 0 算
+			}
+			files.push({ rel: child, size });
+		}
+	}
+	files.sort((a, b) => (a.rel < b.rel ? -1 : 1));
+	links.sort();
+	return { files, links };
+}
+
+// 递归传目录时，根目录合法不代表子文件合法：walk 出来的每个路径都要再过一遍，
+// 免得 put 一个上层目录就把 ~/.ssh 里的私钥一起带上，或者 get 把文件写进配置目录。
+export const insideGuardDirs = (file) => {
+	const fold = (value) =>
+		process.platform === "linux" ? value : value.toLowerCase();
+	const full = fold(resolve(expandHome(file)));
+	return [configDir(), join(homedir(), ".ssh")].some((dir) => {
+		const root = fold(resolve(dir));
+		return full === root || full.startsWith(`${root}${sep}`);
+	});
+};
+
+const sftpCall = (sftp, method, ...args) =>
+	new Promise((resolve, reject) => {
+		sftp[method](...args, (error, result) =>
+			error ? reject(error) : resolve(result),
+		);
+	});
+
+// 远端目录里的普通文件。readdir 的 attrs 自带类型判断，不用再 lstat 一遍。
+export async function collectRemoteTree(sftp, root) {
+	const files = [];
+	const links = [];
+	const stack = [{ rel: "", dir: root }];
+	while (stack.length) {
+		const { rel, dir } = stack.pop();
+		const entries = await sftpCall(sftp, "readdir", dir);
+		for (const entry of entries) {
+			if (entry.filename === "." || entry.filename === "..") continue;
+			const child = rel ? `${rel}/${entry.filename}` : entry.filename;
+			const attrs = entry.attrs;
+			if (attrs.isSymbolicLink()) {
+				links.push(child);
+				continue;
+			}
+			if (attrs.isDirectory()) {
+				stack.push({ rel: child, dir: `${dir}/${entry.filename}` });
+				continue;
+			}
+			if (attrs.isFile())
+				files.push({ rel: child, size: Number(attrs.size) || 0 });
+		}
+	}
+	files.sort((a, b) => (a.rel < b.rel ? -1 : 1));
+	links.sort();
+	return { files, links };
+}
+
+const remoteDir = (base) => base.replace(/\/+$/, "");
+
+// SFTP 没有 mkdir -p：逐级建，已经存在的报错直接咽掉（EEXIST 是正常情况）。
+const makeRemoteDirs = async (sftp, dir, cache) => {
+	const parts = dir.split("/").filter(Boolean);
+	let current = dir.startsWith("/") ? "/" : "";
+	for (const part of parts) {
+		current = current === "/" ? `/${part}` : current ? `${current}/${part}` : part;
+		if (cache.has(current)) continue;
+		await new Promise((resolveMkdir) => sftp.mkdir(current, () => resolveMkdir()));
+		cache.add(current);
+	}
+};
+
+const fastTransfer = (sftp, direction, from, to, timeoutMs) =>
+	new Promise((resolve, reject) => {
+		const timer = setTimeout(
+			() => reject(new Error(`传输超时（${timeoutMs} 毫秒）`)),
+			timeoutMs,
+		);
+		const done = (error) => {
+			clearTimeout(timer);
+			if (error) reject(error);
+			else resolve();
+		};
+		if (direction === "put") sftp.fastPut(from, to, done);
+		else sftp.fastGet(to, from, done);
+	});
+
+const treeReport = (
+	verb,
+	doneFiles,
+	bytes,
+	total,
+	links,
+	guarded,
+	failures,
+	target,
+	timedOut,
+) => {
+	const head = `${verb} ${doneFiles}/${total} 个文件（${humanSize(bytes)}）→ ${target}`;
+	const lines = [head];
+	if (timedOut) lines.push("时间预算用完，剩下的文件没传；可以加 timeoutMs 再试");
+	if (guarded)
+		lines.push(
+			`跳过 ${guarded} 个在受保护目录（~/.ssh、magpie 配置）里的文件`,
+		);
+	if (links.length) {
+		const shown = links.slice(0, 10).join(", ");
+		lines.push(
+			`跳过 ${links.length} 个符号链接：${shown}${links.length > 10 ? " …" : ""}`,
+		);
+	}
+	if (!failures.length) return `exit 0\n${lines.join("\n")}`;
+	const shown = failures.slice(0, 20);
+	return `exit -1\n[stderr]\n${shown.join("\n")}${failures.length > shown.length ? `\n…还有 ${failures.length - shown.length} 个失败没列` : ""}\n${lines.join("\n")}`;
+};
+
+const putInto = async (sftp, local, target, { deadline, left }) => {
+	let stat;
+	try {
+		stat = statSync(local);
+	} catch (error) {
+		throw new Error(`本机路径读不到：${local}（${error.code ?? error.message}）`);
+	}
+	if (stat.isFile()) {
+		await fastTransfer(sftp, "put", local, target, left());
+		return `exit 0\n${local} → ${target}`;
+	}
+	if (!stat.isDirectory())
+		throw new Error(`本机路径不是普通文件或目录：${local}`);
+	const cache = new Set();
+	await makeRemoteDirs(sftp, target, cache);
+	const walked = walkLocalTree(local);
+	const files = [];
+	let guarded = 0;
+	for (const file of walked.files) {
+		if (insideGuardDirs(join(local, file.rel))) guarded += 1;
+		else files.push(file);
+	}
+	const links = walked.links;
+	const failures = [];
+	let doneFiles = 0;
+	let bytes = 0;
+	let timedOut = false;
+	for (const file of files) {
+		if (Date.now() >= deadline) {
+			timedOut = true;
+			break;
+		}
+		const dest = `${remoteDir(target)}/${file.rel}`;
+		try {
+			await makeRemoteDirs(sftp, posix.dirname(dest), cache);
+			await fastTransfer(sftp, "put", join(local, file.rel), dest, left());
+			doneFiles += 1;
+			bytes += file.size;
+		} catch (error) {
+			failures.push(`${file.rel}: ${error.message ?? error}`);
+			if (Date.now() >= deadline) {
+				timedOut = true;
+				break;
+			}
+		}
+	}
+	if (timedOut) {
+		try {
+			sftp.end();
+		} catch {
+			// 已经关了
+		}
+	}
+	return treeReport(
+		"上传",
+		doneFiles,
+		bytes,
+		files.length,
+		links,
+		guarded,
+		failures,
+		target,
+		timedOut,
+	);
+};
+
+const getFrom = async (sftp, remote, local, { deadline, left }) => {
+	const stat = await sftpCall(sftp, "stat", remote);
+	if (stat.isFile()) {
+		await fastTransfer(sftp, "get", local, remote, left());
+		return `exit 0\n${remote} → ${local}`;
+	}
+	if (!stat.isDirectory())
+		throw new Error(`远端路径不是普通文件或目录：${remote}`);
+	const { files, links } = await collectRemoteTree(sftp, remote);
+	mkdirSync(local, { recursive: true });
+	const failures = [];
+	let guarded = 0;
+	let doneFiles = 0;
+	let bytes = 0;
+	let timedOut = false;
+	for (const file of files) {
+		if (Date.now() >= deadline) {
+			timedOut = true;
+			break;
+		}
+		const source = `${remoteDir(remote)}/${file.rel}`;
+		const dest = join(local, file.rel);
+		if (insideGuardDirs(dest)) {
+			guarded += 1;
+			continue;
+		}
+		try {
+			mkdirSync(dirname(dest), { recursive: true });
+			await fastTransfer(sftp, "get", dest, source, left());
+			doneFiles += 1;
+			bytes += file.size;
+		} catch (error) {
+			failures.push(`${file.rel}: ${error.message ?? error}`);
+			if (Date.now() >= deadline) {
+				timedOut = true;
+				break;
+			}
+		}
+	}
+	if (timedOut) {
+		try {
+			sftp.end();
+		} catch {
+			// 已经关了
+		}
+	}
+	return treeReport(
+		"下载",
+		doneFiles,
+		bytes,
+		files.length,
+		links,
+		guarded,
+		failures,
+		local,
+		timedOut,
+	);
+};
+
 export async function transferRemote(
 	host,
 	local,
@@ -917,29 +1197,11 @@ export async function transferRemote(
 			});
 		});
 		const path = remotePath(remote, home);
-		return await new Promise((resolve) => {
-			const timer = setTimeout(() => {
-				broken = true;
-				// 只关自己的 SFTP 子系统：连接上还有别的调用时留给它们，
-				// 整条作废会把同主机上并发的 run 一起掐断
-				try {
-					sftp.end();
-				} catch {
-					// 已经关了
-				}
-				resolve(`exit -1（传输超时，${timeoutMs} 毫秒）`);
-			}, left());
-			const done = (err) => {
-				clearTimeout(timer);
-				resolve(
-					err
-						? `exit -1\n[stderr]\n${err.message}`
-						: `exit 0\n${direction === "put" ? `${local} → ${path}` : `${path} → ${local}`}`,
-				);
-			};
-			if (direction === "put") sftp.fastPut(local, path, done);
-			else sftp.fastGet(path, local, done);
-		});
+		return direction === "put"
+			? await putInto(sftp, local, path, { deadline, left })
+			: await getFrom(sftp, path, local, { deadline, left });
+	} catch (error) {
+		return `exit -1\n[stderr]\n${error.message ?? error}`;
 	} finally {
 		releaseConnection(entry, { broken });
 	}

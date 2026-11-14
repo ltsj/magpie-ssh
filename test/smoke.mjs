@@ -7,6 +7,8 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
+	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
@@ -18,10 +20,12 @@ import {
 	closeAllConnections,
 	auditFile,
 	AUDIT_FILE_MAX_BYTES,
+	collectRemoteTree,
 	connectConfig,
 	configDir,
 	fingerprint,
 	guardLocal,
+	insideGuardDirs,
 	hostIds,
 	keyType,
 	makeSink,
@@ -38,6 +42,7 @@ import {
 	poolStats,
 	remotePath,
 	render,
+	walkLocalTree,
 	sshConfigOptions,
 	verifyHostKey,
 } from "../lib.mjs";
@@ -425,6 +430,12 @@ assert.equal(
 	null,
 );
 assert.equal(guardLocal(join(tmpdir(), "elsewhere", "a.txt"), "get"), null);
+
+// 递归传目录时逐个路径再查一遍：上层目录合法也不能把 ~/.ssh 带出去
+assert.equal(insideGuardDirs(join(home, ".SSH", "id_ed25519")), true);
+assert.equal(insideGuardDirs(join(home, ".ssh", "nested", "x")), true);
+assert.equal(insideGuardDirs(join(configDir(), "plugins.json")), true);
+assert.equal(insideGuardDirs(join(tmpdir(), "elsewhere", "a.txt")), false);
 // plugins.json 读坏了要报出来，不能悄悄当空表：用户会以为主机没了，跑去重配一遍
 const pluginsJson = join(home, "magpie", "plugins.json");
 writeFileSync(pluginsJson, '{ "plugins": [ 少个括号 ');
@@ -591,5 +602,64 @@ assert.equal(
 	poolKey({ ...host, proxyJump: "none" }),
 	poolKey({ ...host, proxyJump: "" }),
 );
+
+// 目录递归：只收普通文件，符号链接跳过，排序稳定
+{
+	const root = mkdtempSync(join(tmpdir(), "magpie-tree-"));
+	mkdirSync(join(root, "sub", "deep"), { recursive: true });
+	writeFileSync(join(root, "a.txt"), "aaa");
+	writeFileSync(join(root, "sub", "b.bin"), Buffer.alloc(10));
+	writeFileSync(join(root, "sub", "deep", "c.txt"), "c");
+	let linkMade = false;
+	try {
+		symlinkSync(join(root, "a.txt"), join(root, "link.txt"));
+		linkMade = true;
+	} catch {
+		// Windows 上没权限建符号链接：这条断言就不跑
+	}
+	const { files, links } = walkLocalTree(root);
+	assert.deepEqual(
+		files.map((file) => [file.rel, file.size]),
+		[
+			["a.txt", 3],
+			["sub/b.bin", 10],
+			["sub/deep/c.txt", 1],
+		],
+	);
+	assert.deepEqual(links, linkMade ? ["link.txt"] : []);
+	rmSync(root, { recursive: true, force: true });
+}
+
+// 远端目录收集：用假的 sftp 回目录列表，特殊文件跳过
+{
+	const attrs = (kind, size = 0) => ({
+		size,
+		isFile: () => kind === "file",
+		isDirectory: () => kind === "dir",
+		isSymbolicLink: () => kind === "link",
+	});
+	const listing = {
+		"/root": [
+			{ filename: ".", attrs: attrs("dir") },
+			{ filename: "..", attrs: attrs("dir") },
+			{ filename: "one.txt", attrs: attrs("file", 5) },
+			{ filename: "sub", attrs: attrs("dir") },
+			{ filename: "jump", attrs: attrs("link") },
+			{ filename: "fifo", attrs: attrs("other") },
+		],
+		"/root/sub": [{ filename: "two.txt", attrs: attrs("file", 7) }],
+	};
+	const fakeSftp = {
+		readdir(dir, cb) {
+			cb(null, listing[dir] ?? []);
+		},
+	};
+	const { files, links } = await collectRemoteTree(fakeSftp, "/root");
+	assert.deepEqual(files, [
+		{ rel: "one.txt", size: 5 },
+		{ rel: "sub/two.txt", size: 7 },
+	]);
+	assert.deepEqual(links, ["jump"]);
+}
 
 console.log("smoke ok");

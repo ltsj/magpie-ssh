@@ -23,6 +23,7 @@
 - **三种认证** — 密码、私钥（带口令的也行）、ssh agent，按这个顺序取第一个配了的；只给 keyboard-interactive 的服务器也能用密码登录。
 - **读 `~/.ssh/config`** — 主机只填别名，`HostName`、`User`、`Port`、`IdentityFile`、`ProxyJump`、`StrictHostKeyChecking` 自动补上；记录里自己填了的字段永远优先。
 - **跳板机** — 页面上填 `user@host:port`，或者直接用 `~/.ssh/config` 里的 `ProxyJump`，经跳板开一条通道连目标机。
+- **传文件也传目录** — `put` / `get` 遇到目录就递归，逐文件传，单个失败不影响其他；符号链接和特殊文件跳过，时间用完给部分结果。
 - **连接复用** — 同一台主机第一次握手 0.3~1 秒，之后约 0.1 秒；空闲 60 秒自动断开。
 - **真校验主机指纹** — 按 `known_hosts` 的规范身份比对，认哈希行和 `@revoked`；首次信任写在握手签名校验通过之后。
 - **批量执行** — `host` 传 `*` 或逗号分隔多台，八台并发、共享一份时间预算，末尾给成功/失败汇总。
@@ -44,7 +45,16 @@ magpie plugin update magpie-ssh             # 以后升级
 | 仓库 | `magpie plugin add "github:ltsj/magpie-ssh"` | 日常 |
 | 本地文件夹 | 先在该目录 `pnpm install`，再 `magpie plugin add C:/path/to/magpie-ssh` | 改代码 |
 
-文件夹装的插件不在 magpie 的 `plugins/` 项目里，`ssh2` 得装在插件自己的 `node_modules`。目前还没发到 npm。
+文件夹装的插件不在 magpie 的 `plugins/` 项目里，`ssh2` 得装在插件自己的 `node_modules`。
+
+目前还没发到 npm。维护者要发的话（本机 `npm whoami` 会报 `ENEEDAUTH`，先登录）：
+
+```bash
+npm login
+npm publish
+```
+
+发完把上面的安装命令换成 `magpie plugin add magpie-ssh`。
 
 ## 🤖 在 agent 里用
 
@@ -79,8 +89,19 @@ claude mcp add --transport http magpie-ssh http://127.0.0.1:3425/mcp/magpie/tool
 | `magpie-ssh_hosts` | 无 | 列出主机（名称、地址、认证方式，不含凭据） |
 | `magpie-ssh_check` | `host`, `timeoutMs?` | 只握手不发命令，回报能否连上、耗时、服务器指纹（`ssh-ed25519 SHA256:…`） |
 | `magpie-ssh_run` | `host`, `command`, `timeoutMs?`, `maxChars?` | 执行一条命令，回退出码和输出 |
-| `magpie-ssh_put` | `host`, `local`, `remote` | SFTP 上传 |
-| `magpie-ssh_get` | `host`, `remote`, `local` | SFTP 下载 |
+| `magpie-ssh_put` | `host`, `local`, `remote`, `timeoutMs?` | SFTP 上传文件或目录 |
+| `magpie-ssh_get` | `host`, `remote`, `local`, `timeoutMs?` | SFTP 下载文件或目录 |
+
+### 传文件与目录
+
+`local` / `remote` 是文件就直接传，是目录就递归，一个文件一条 SFTP 传输：
+
+- 单个文件失败不影响其他；末尾一行 `上传 12/14 个文件（3.4 MB）→ /srv/app`，有失败时回 `exit -1`，`[stderr]` 里列前 20 条。
+- 符号链接、管道、设备文件跳过，报告里给个数；不跟进去，也不复制链接本身。
+- 目录里的内容放进目标目录本身，不额外套一层目录名（`put ~/app /srv/app` 得到 `/srv/app/main.js`）。远端目录逐级建；本机目录也会建。空目录不建（没有文件可传）。
+- 只传内容：**不保留权限、属主、mtime**，也不做校验和。
+- 没有续传和进度条。时间预算用完就停，传完的留着，报告里写明超时；加大 `timeoutMs` 再跑一次会重传已经传过的文件。
+- 受保护目录（`~/.ssh`、magpie 配置目录）里的文件按路径逐个跳过，即使传的是它们的上层目录。
 
 ### host 怎么写
 
@@ -95,7 +116,7 @@ magpie 给每个工具 55 秒，插件自己留出余量：
 | `run` 单台 | 45 秒 | 50 秒（`timeoutMs`） |
 | `run` 批量 | 45 秒 | 50 秒，**所有主机共享一份** |
 | `check` | 8 秒 | 50 秒（`timeoutMs`），批量时共享 |
-| `put` / `get` | 45 秒 | — |
+| `put` / `get` | 45 秒 | 50 秒（`timeoutMs`），整个递归共用 |
 
 连接和握手花掉的时间从同一份预算里扣，所以一次调用不会越过 magpie 的 55 秒被强行掐断。
 
@@ -167,7 +188,7 @@ magpie 给每个工具 55 秒，插件自己留出余量：
 
 - **跳板机只支持一跳** — `ProxyJump a,b` 这样的多跳链只用第一跳；`LocalForward`、config 里的 `Match` 块、`%d`/`%h` 这类 token 都不支持。
 - **验证码过不去** — keyboard-interactive 只用密码回答，OTP / 二次确认的服务器连不上。
-- **`put` / `get` 只传单个文件** — 不递归目录、不续传、没有进度，大文件只靠 45 秒超时兜底。
+- **`put` / `get` 不续传、不保属性** — 断在中途只能整段重来（已传完的文件会再传一遍），权限、属主、mtime 不保留；符号链接和特殊文件只跳过不复制。
 - **页面不能测连接、不能生成密钥** — 沙箱里没有网络，也不读 `~/.ssh`。
 
 ---
@@ -176,7 +197,7 @@ magpie 给每个工具 55 秒，插件自己留出余量：
 
 - 密码、私钥口令都是以**明文**存在 `~/.config/magpie/plugins.json` 里的（magpie 的 `plugin-auth.json` 也这样）。不想明文就改用 agent，把密码和口令字段留空；导出主机表得到的 JSON 里同样是明文。
 - agent 一旦能用这些主机，就能以你的身份在那些机器上执行任意命令。别把 root 主机随手加进来。
-- `put`/`get` 的本机路径是**真**的本机路径，没有沙箱：`get` 能覆盖本机任何文件，`put` 能把本机任何文件传出去。唯一的护栏是：`get` 不许往 `~/.ssh` 和 magpie 配置目录（`plugins.json` 就在里面）写，`put` 不许从这两个目录取文件。其余路径照旧——被内容注入的 agent 仍可能把别的文件带走，传文件前自己看清楚参数。
+- `put`/`get` 的本机路径是**真**的本机路径，没有沙箱：`get` 能覆盖本机任何文件，`put` 能把本机任何文件传出去。唯一的护栏是：`get` 不许往 `~/.ssh` 和 magpie 配置目录（`plugins.json` 就在里面）写，`put` 不许从这两个目录取文件；递归时逐个文件查这条规则，但传一个上层目录仍会把里面其他文件一起带走（受保护目录除外）。被内容注入的 agent 仍可能把别的文件传出去，传文件前自己看清楚参数。
 - `magpie plugin rm` 会把插件设置一起删掉，删之前先备份 `hosts`。
 - 工具以你的权限运行，结果只回给调用它的那个 agent。
 - 插件选项里 `auditLog: true` 时，每次 `run`/`check`/`put`/`get` 往 `~/.config/magpie/magpie-ssh-audit.log` 追加一行 JSON（时间、工具、主机、命令、结果首行），多 agent 共用一台 root 机器时能查谁跑了什么。默认关闭；文件是 `0600`、目录 `0700`，写到 2 MB 就转成 `magpie-ssh-audit.log.1` 再写（只留一代）。**命令原文会原样记下来**（`mysql -p…`、`curl -H "Authorization: …"` 都会落盘），要带凭据的命令就别开日志。
@@ -212,7 +233,7 @@ pnpm install
 node test/smoke.mjs        # 或者 pnpm test
 ```
 
-只测纯逻辑：读 `plugins.json` 的各种兜底与坏文件报错、连接配置与认证优先级（含私钥口令、keyboard-interactive）、`~/.ssh/config` 的别名/通配/排除与跳板机写法、`known_hosts` 指纹判断、`host` 多选解析、输出截断与 stdout/stderr 顺序、审计开关与轮转、连接放回与「不连坐」、本机路径护栏、工具在坏参数和空配置下回文本而不抛。真连接不测（要真主机和凭据）。
+只测纯逻辑：读 `plugins.json` 的各种兜底与坏文件报错、连接配置与认证优先级（含私钥口令、keyboard-interactive）、`~/.ssh/config` 的别名/通配/排除与跳板机写法、`known_hosts` 指纹判断、`host` 多选解析、输出截断与 stdout/stderr 顺序、审计开关与轮转、连接放回与「不连坐」、本机路径护栏（含递归时的逐文件检查）、本机/远端目录遍历（符号链接与特殊文件跳过）、工具在坏参数和空配置下回文本而不抛。真连接不测（要真主机和凭据）。
 
 改代码时注意三条硬约束：
 

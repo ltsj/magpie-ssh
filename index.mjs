@@ -166,13 +166,17 @@ export const MagpieSsh = async (_input, options) => {
 
 			put: {
 				description:
-					"把本机文件传到已配置的主机上（SFTP），一次一个文件。不从插件设置目录和 ~/.ssh 取文件。",
+					"把本机文件或目录传到已配置的主机上（SFTP）。目录会递归逐个文件传，符号链接和特殊文件跳过；单个文件失败不影响其他文件。不从插件设置目录和 ~/.ssh 取文件。",
 				args: {
 					type: "object",
 					properties: {
 						host: { type: "string" },
-						local: { type: "string", description: "本机路径" },
+						local: { type: "string", description: "本机文件或目录" },
 						remote: { type: "string", description: "主机上的目标路径" },
+						timeoutMs: {
+							type: "number",
+							description: "传输时间预算毫秒，默认 45000，最多 50000",
+						},
 					},
 					required: ["host", "local", "remote"],
 				},
@@ -185,13 +189,17 @@ export const MagpieSsh = async (_input, options) => {
 						return "需要 local、remote 两个路径。";
 					const blocked = guardLocal(args.local, "put");
 					if (blocked) return blocked;
+					const timeoutMs = Math.min(
+						Number(args.timeoutMs) || TOOL_BUDGET_MS,
+						50000,
+					);
 					try {
 						const text = await transferRemote(
 							picked.host,
 							expandHome(args.local),
 							String(args.remote),
 							"put",
-							{ signal: ctx?.abort, reuse },
+							{ signal: ctx?.abort, reuse, timeoutMs },
 						);
 						audit(options, {
 							tool: "put",
@@ -208,13 +216,17 @@ export const MagpieSsh = async (_input, options) => {
 
 			get: {
 				description:
-					"把已配置主机上的文件取回本机（SFTP），一次一个文件。不往插件设置目录和 ~/.ssh 写文件。",
+					"把已配置主机上的文件或目录取回本机（SFTP）。目录会递归逐个文件取，符号链接和特殊文件跳过；单个文件失败不影响其他文件。不往插件设置目录和 ~/.ssh 写文件。",
 				args: {
 					type: "object",
 					properties: {
 						host: { type: "string" },
-						remote: { type: "string", description: "主机上的文件路径" },
+						remote: { type: "string", description: "主机上的文件或目录" },
 						local: { type: "string", description: "本机目标路径" },
+						timeoutMs: {
+							type: "number",
+							description: "传输时间预算毫秒，默认 45000，最多 50000",
+						},
 					},
 					required: ["host", "remote", "local"],
 				},
@@ -227,13 +239,17 @@ export const MagpieSsh = async (_input, options) => {
 						return "需要 remote、local 两个路径。";
 					const blocked = guardLocal(args.local, "get");
 					if (blocked) return blocked;
+					const timeoutMs = Math.min(
+						Number(args.timeoutMs) || TOOL_BUDGET_MS,
+						50000,
+					);
 					try {
 						const text = await transferRemote(
 							picked.host,
 							expandHome(args.local),
 							String(args.remote),
 							"get",
-							{ signal: ctx?.abort, reuse },
+							{ signal: ctx?.abort, reuse, timeoutMs },
 						);
 						audit(options, {
 							tool: "get",

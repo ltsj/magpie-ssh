@@ -1,6 +1,6 @@
 {
   "name": "magpie-ssh",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "SSH hosts in magpie's sidebar, with tools every agent can call",
   "type": "module",
   "main": "./index.mjs",
