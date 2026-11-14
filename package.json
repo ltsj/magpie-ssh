@@ -8,8 +8,7 @@
 		"index.mjs",
 		"lib.mjs",
 		"page",
-		"README.md",
-		"GOAL.md"
+		"README.md"
 	],
 	"scripts": {
 		"test": "node test/smoke.mjs"

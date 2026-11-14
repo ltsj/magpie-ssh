@@ -75,8 +75,11 @@ export function pickHost(hosts, key) {
 				"还没有配置 SSH 主机：打开 magpie 侧边栏的「SSH 主机」页添加一台。",
 		};
 	}
-	const host = hosts.find(
-		(item) => item.name === key || item.host === key || item.id === key,
+	const wanted = String(key ?? "").toLowerCase();
+	const host = hosts.find((item) =>
+		[item.name, item.host, item.id].some(
+			(value) => String(value ?? "").toLowerCase() === wanted,
+		),
 	);
 	if (!host) {
 		return {
