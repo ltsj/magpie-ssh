@@ -1,6 +1,6 @@
 {
   "name": "magpie-ssh",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "SSH hosts in magpie's sidebar, with tools every agent can call",
   "type": "module",
   "main": "./index.mjs",
@@ -35,5 +35,13 @@
   "license": "MIT",
   "dependencies": {
     "ssh2": "^1.17.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ltsj/magpie-ssh.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ltsj/magpie-ssh/issues"
+  },
+  "homepage": "https://github.com/ltsj/magpie-ssh#readme"
 }
