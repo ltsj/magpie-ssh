@@ -193,6 +193,11 @@ assert.match(
 	render({ code: -1, aborted: true, stdout: "", stderr: "" }, 100),
 	/^exit -1（已超时，连接被断开）$/,
 );
+// 取消不能说成超时，更不能说成成功
+assert.equal(
+	render({ code: -1, aborted: true, reason: "cancel", segments: [] }, 100),
+	"exit -1（调用被取消，连接已断开）",
+);
 assert.match(
 	render(
 		{ code: 0, aborted: false, note: "[note]", stdout: "x", stderr: "" },

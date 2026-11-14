@@ -61,7 +61,7 @@ export const MagpieSsh = async (_input, options) => {
 				},
 				async execute(args = {}, ctx) {
 					try {
-						const timeoutMs = Number(args.timeoutMs) || 8000;
+						const timeoutMs = Math.min(Number(args.timeoutMs) || 8000, 50000);
 						const picked = pickHosts(hosts(), args.host);
 						if (picked.error) return picked.error;
 						const lines = await Promise.all(

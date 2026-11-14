@@ -287,24 +287,32 @@ export async function execOnce(
 		};
 		const result = await new Promise((resolve) => {
 			let aborted = false;
+			let reason = null;
+			let settled = false;
 			const finish = (code) => {
+				if (settled) return;
+				settled = true;
 				push("out", decoders.out.end());
 				push("err", decoders.err.end());
-				resolve({ code, aborted, segments });
+				resolve({ code, aborted, reason, segments });
 			};
-			const timer = setTimeout(() => {
+			const stop = (why) => {
 				aborted = true;
+				reason ??= why;
 				client.end();
 				finish(-1);
-			}, left());
+			};
+			const timer = setTimeout(() => stop("timeout"), left());
+			// 取消也是失败：否则关连接后拿到的 undefined 会被当成 exit 0
+			signal?.addEventListener("abort", () => stop("cancel"), { once: true });
+			// 取消可能发生在连接期间：那时监听器还没挂上，abort 事件不会再补发
+			if (signal?.aborted) stop("cancel");
+			if (settled) return;
 			client.exec(String(command), (err, stream) => {
 				if (err) {
 					clearTimeout(timer);
-					resolve({
-						code: -1,
-						aborted,
-						segments: [{ kind: "err", text: String(err.message) }],
-					});
+					if (!aborted) push("err", String(err.message));
+					finish(-1);
 					return;
 				}
 				const collect = (kind, decoder) => (chunk) => {
@@ -453,7 +461,11 @@ const bodyOf = (result) => {
 
 export function render(result, maxChars) {
 	const head = [`exit ${result.code}`];
-	if (result.aborted) head[0] += "（已超时，连接被断开）";
+	if (result.aborted)
+		head[0] +=
+			result.reason === "cancel"
+				? "（调用被取消，连接已断开）"
+				: "（已超时，连接被断开）";
 	if (result.note) head.push(result.note);
 	const body = bodyOf(result);
 	const text = body ? `${head.join("\n")}\n${body}` : head.join("\n");
