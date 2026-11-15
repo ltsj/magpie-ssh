@@ -42,12 +42,13 @@ export const makeSink = (cap = MAX_COLLECT_BYTES) => {
 	};
 };
 
-const pluginsJson = () =>
-	join(
-		process.env.XDG_CONFIG_HOME || join(homedir(), ".config"),
-		"magpie",
-		"plugins.json",
-	);
+// magpie 的设置目录：XDG_CONFIG_HOME 在时是 $XDG_CONFIG_HOME/magpie，
+// 否则 ~/.config/magpie。审计日志和凭据护栏都按这个目录算，
+// 少拼一层 "magpie" 会把整个 ~/.config 当成凭据目录拦下来。
+export const configDir = () =>
+	join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "magpie");
+
+const pluginsJson = () => join(configDir(), "plugins.json");
 
 const normalize = (value) =>
 	String(value ?? "")
@@ -1004,7 +1005,9 @@ const fastTransfer = (sftp, direction, from, to, timeoutMs) =>
 		else sftp.fastGet(to, from, done);
 	});
 
-const treeReport = (
+// 目录传输的结果：exit 0 只在「一个不落」时给。超时也算没传完——
+// 把不完整的结果报成 exit 0，调用方会以为是全量成功。
+export const treeReport = (
 	verb,
 	doneFiles,
 	bytes,
@@ -1017,7 +1020,6 @@ const treeReport = (
 ) => {
 	const head = `${verb} ${doneFiles}/${total} 个文件（${humanSize(bytes)}）→ ${target}`;
 	const lines = [head];
-	if (timedOut) lines.push("时间预算用完，剩下的文件没传；可以加 timeoutMs 再试");
 	if (guarded)
 		lines.push(
 			`跳过 ${guarded} 个在受保护目录（~/.ssh、magpie 配置）里的文件`,
@@ -1028,7 +1030,10 @@ const treeReport = (
 			`跳过 ${links.length} 个符号链接：${shown}${links.length > 10 ? " …" : ""}`,
 		);
 	}
-	if (!failures.length) return `exit 0\n${lines.join("\n")}`;
+	const timeoutNote = "时间预算用完，剩下的文件没传；可以加 timeoutMs 再试";
+	if (!failures.length && !timedOut) return `exit 0\n${lines.join("\n")}`;
+	if (!failures.length) return `exit -1\n[stderr] ${timeoutNote}\n${lines.join("\n")}`;
+	if (timedOut) failures.push(timeoutNote);
 	const shown = failures.slice(0, 20);
 	return `exit -1\n[stderr]\n${shown.join("\n")}${failures.length > shown.length ? `\n…还有 ${failures.length - shown.length} 个失败没列` : ""}\n${lines.join("\n")}`;
 };
@@ -1273,8 +1278,6 @@ export const batchBudget = (maxChars, count) =>
 	Math.max(200, Math.floor(clampChars(maxChars) / Math.max(count, 1)));
 
 // 审计日志默认关：多 agent 共用一台 root 主机时，把谁在什么时候跑了什么记成一行 JSON。
-export const configDir = () =>
-	process.env.XDG_CONFIG_HOME || join(homedir(), ".config", "magpie");
 export const auditFile = () => join(configDir(), "magpie-ssh-audit.log");
 // 日志不能无限长：满了就换一份 .1，只留一代——查「谁跑了什么」看最近的够用
 export const AUDIT_FILE_MAX_BYTES = 2 * 1024 * 1024;

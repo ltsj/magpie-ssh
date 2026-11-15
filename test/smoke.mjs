@@ -38,6 +38,7 @@ import {
 	registerHostKey,
 	resolveSshHost,
 	releaseConnection,
+	treeReport,
 	poolKey,
 	poolStats,
 	remotePath,
@@ -416,11 +417,13 @@ assert.equal(clampChars(1), 200);
 if (process.platform !== "linux") {
 	assert.match(guardLocal(join(home, ".SSH", "id_ed25519"), "get"), /不动/);
 	assert.match(guardLocal(join(home, ".SSH", "id_ed25519"), "put"), /不动/);
-	assert.match(
-		guardLocal(join(home, ".Config", "magpie", "plugins.json"), "put"),
-		/不动/,
-	);
+	// 配置目录本身也在 home 下，大小写变体同样要拦住
+	assert.match(guardLocal(join(home, "MAGPIE", "plugins.json"), "put"), /不动/);
 }
+// 护栏只盖住 magpie 自己的目录，不能把整个 ~/.config 都算进去：
+// Linux 上 XDG_CONFIG_HOME 往往就设成 ~/.config，那样别的应用的文件也会被一起拦掉
+assert.equal(guardLocal(join(home, "other-app", "settings.json"), "put"), null);
+assert.equal(guardLocal(join(home, "other-app", "settings.json"), "get"), null);
 assert.match(guardLocal(join(configDir(), "plugins.json"), "get"), /不动/);
 assert.match(guardLocal(join(home, ".ssh", "authorized_keys"), "get"), /不动/);
 assert.match(guardLocal(join(home, ".ssh", "id_ed25519"), "put"), /不动/);
@@ -430,6 +433,22 @@ assert.equal(
 	null,
 );
 assert.equal(guardLocal(join(tmpdir(), "elsewhere", "a.txt"), "get"), null);
+
+// 配置目录固定是 $XDG_CONFIG_HOME/magpie：少拼一层会把整个 ~/.config 当成凭据目录
+assert.equal(configDir(), join(home, "magpie"));
+
+// 目录传输的报告：只有「一个不落」才是 exit 0；超时和失败都得是 exit -1，
+// 否则调用方会把「传了 3 个、还剩 30 个」当成全量成功
+assert.match(treeReport("上传", 3, 300, 3, [], 0, [], "/srv", false), /^exit 0/);
+assert.match(treeReport("上传", 1, 100, 30, [], 0, [], "/srv", true), /^exit -1/);
+assert.match(
+	treeReport("上传", 1, 100, 30, [], 0, [], "/srv", true),
+	/时间预算用完/,
+);
+assert.match(
+	treeReport("下载", 1, 100, 2, [], 0, ["b.css: 拒绝"], "/tmp/x", false),
+	/^exit -1\n\[stderr\]\nb\.css: 拒绝/,
+);
 
 // 递归传目录时逐个路径再查一遍：上层目录合法也不能把 ~/.ssh 带出去
 assert.equal(insideGuardDirs(join(home, ".SSH", "id_ed25519")), true);

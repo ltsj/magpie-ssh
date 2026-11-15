@@ -26,4 +26,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: node test/smoke.mjs
+      # 进程内起一个真 SFTP 服务端再把 put/get 走一遍：纯逻辑测不到连接层
+      - run: node test/e2e.mjs
+        timeout-minutes: 3
       - run: npm pack --dry-run

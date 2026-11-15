@@ -2,6 +2,18 @@
 
 版本号跟着 npm 包走，`0.x` 期间小版本之间可能有行为变化，破坏性改动会写在这里。
 
+## 0.9.0
+
+### 新增
+
+- `test/e2e.mjs`：进程内起一个 ssh2 SFTP 服务端（映射到临时目录，支持 OPEN/OPENDIR/READDIR/READ/WRITE/CLOSE/FSTAT/STAT/LSTAT/MKDIR/REMOVE/REALPATH），用真的 SSH 连接把 `put` / `get` 跑一遍——单文件往返、嵌套目录、空目录、符号链接跳过、传上层目录时私钥不被带走、超时给部分结果、路径不存在时文本报错。不需要真主机和凭据，60 秒看门狗兜底；测试把 `HOME` / `USERPROFILE` / `XDG_CONFIG_HOME` 指到临时目录，不碰真的 `known_hosts` 和 `plugins.json`。
+- CI 多跑一步 `node test/e2e.mjs`（3 分钟超时），`package.json` 加 `test:e2e` 和 `test:all`。
+
+### 修复
+
+- 递归传输超时原本回 `exit 0`，调用方会当成全量成功；现在回 `exit -1`，`[stderr]` 里第一条是超时说明。
+- `configDir()` 少拼一层 `magpie`：`XDG_CONFIG_HOME` 设成 `~/.config` 时把整个 `~/.config` 当成凭据目录，别的应用的 `put` / `get` 会被一起拦掉。现在配置目录固定是 `$XDG_CONFIG_HOME/magpie`，护栏和审计日志都按它算。
+
 ## 0.8.0
 
 ### 新增

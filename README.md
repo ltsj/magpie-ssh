@@ -100,7 +100,7 @@ claude mcp add --transport http magpie-ssh http://127.0.0.1:3425/mcp/magpie/tool
 - 符号链接、管道、设备文件跳过，报告里给个数；不跟进去，也不复制链接本身。
 - 目录里的内容放进目标目录本身，不额外套一层目录名（`put ~/app /srv/app` 得到 `/srv/app/main.js`）。远端目录逐级建；本机目录也会建。空目录不建（没有文件可传）。
 - 只传内容：**不保留权限、属主、mtime**，也不做校验和。
-- 没有续传和进度条。时间预算用完就停，传完的留着，报告里写明超时；加大 `timeoutMs` 再跑一次会重传已经传过的文件。
+- 没有续传和进度条。时间预算用完就停，传完的留着，报告里写明超时，**退出码是 `exit -1`**——没传完就不算成功；加大 `timeoutMs` 再跑一次会重传已经传过的文件。
 - 受保护目录（`~/.ssh`、magpie 配置目录）里的文件按路径逐个跳过，即使传的是它们的上层目录。
 
 ### host 怎么写
@@ -190,6 +190,7 @@ magpie 给每个工具 55 秒，插件自己留出余量：
 - **验证码过不去** — keyboard-interactive 只用密码回答，OTP / 二次确认的服务器连不上。
 - **`put` / `get` 不续传、不保属性** — 断在中途只能整段重来（已传完的文件会再传一遍），权限、属主、mtime 不保留；符号链接和特殊文件只跳过不复制。
 - **页面不能测连接、不能生成密钥** — 沙箱里没有网络，也不读 `~/.ssh`。
+- **e2e 只覆盖 put/get** — `run` 要真 shell 才测得出来，进程内服务端顶不了，那部分靠人工和 `check`。
 
 ---
 
@@ -215,8 +216,10 @@ magpie 给每个工具 55 秒，插件自己留出余量：
 │   ├── app.js
 │   ├── style.css
 │   └── icon.svg
-├── test/smoke.mjs                # 纯逻辑测试
-├── .github/workflows/ci.yml      # CI：ubuntu/windows × node 18/20/22，跑测试 + npm pack --dry-run
+├── test/
+│   ├── smoke.mjs                 # 纯逻辑测试
+│   └── e2e.mjs                   # 真连接测试：进程内 SFTP 服务端 + put/get 全流程
+├── .github/workflows/ci.yml      # CI：ubuntu/windows × node 18/20/22，跑两套测试 + npm pack --dry-run
 ├── .gitattributes                # 统一 LF：检出时不换成 CRLF
 ├── package.json                  # 插件清单 + magpie.page 元数据
 ├── pnpm-workspace.yaml           # 禁用 ssh2 / cpu-features 的构建脚本（有纯 JS 回退）
@@ -230,10 +233,16 @@ magpie 给每个工具 55 秒，插件自己留出余量：
 
 ```bash
 pnpm install
-node test/smoke.mjs        # 或者 pnpm test
+node test/smoke.mjs        # 纯逻辑，或者 pnpm test
+node test/e2e.mjs          # 真连接，或者 pnpm run test:e2e
+node test/smoke.mjs && node test/e2e.mjs   # 两个一起，pnpm run test:all
 ```
 
-只测纯逻辑：读 `plugins.json` 的各种兜底与坏文件报错、连接配置与认证优先级（含私钥口令、keyboard-interactive）、`~/.ssh/config` 的别名/通配/排除与跳板机写法、`known_hosts` 指纹判断、`host` 多选解析、输出截断与 stdout/stderr 顺序、审计开关与轮转、连接放回与「不连坐」、本机路径护栏（含递归时的逐文件检查）、本机/远端目录遍历（符号链接与特殊文件跳过）、工具在坏参数和空配置下回文本而不抛。真连接不测（要真主机和凭据）。
+`test/smoke.mjs` 只测纯逻辑：读 `plugins.json` 的各种兜底与坏文件报错、连接配置与认证优先级（含私钥口令、keyboard-interactive）、`~/.ssh/config` 的别名/通配/排除与跳板机写法、`known_hosts` 指纹判断、`host` 多选解析、输出截断与 stdout/stderr 顺序、审计开关与轮转、连接放回与「不连坐」、本机路径护栏（含递归时的逐文件检查）、本机/远端目录遍历（符号链接与特殊文件跳过）、工具在坏参数和空配置下回文本而不抛。
+
+`test/e2e.mjs` 起一个**进程内**的 ssh2 SFTP 服务端（映射到临时目录），用真的 SSH 连接把 `put` / `get` 跑一遍：单文件往返、嵌套目录与空目录、符号链接跳过、传上层目录时私钥不被带走、时间预算用尽时给部分结果且回 `exit -1`、本机/远端路径不存在时是文本报错。不需要真主机、不需要凭据，60 秒看门狗兜底，CI 里跑得动。
+
+两边都不碰真的家目录：`test/e2e.mjs` 把 `HOME`、`USERPROFILE`、`XDG_CONFIG_HOME` 全指到临时目录，`known_hosts` 和 `plugins.json` 都是假的。
 
 改代码时注意三条硬约束：
 
@@ -241,7 +250,7 @@ node test/smoke.mjs        # 或者 pnpm test
 - 工具的 `execute` 不许抛异常：坏参数一律回文本。
 - 工具名是 `<插件短名>_<工具名>`，文件夹装的插件用文件夹名当短名。
 
-CI 在 push 到 `master` 和 PR 时跑：`pnpm install --frozen-lockfile`、`node test/smoke.mjs`、`npm pack --dry-run`，平台是 ubuntu 和 windows、Node 18/20/22 六个组合——`engines` 说 >= 18，代码里也有 Windows 专属分支（ssh-agent 的命名管道、路径大小写折叠），只跑一个组合等于没测。改完 `magpie plugin update magpie-ssh`（Git 装法）才会生效到正在跑的 magpie。
+CI 在 push 到 `master` 和 PR 时跑：`pnpm install --frozen-lockfile`、`node test/smoke.mjs`、`node test/e2e.mjs`（3 分钟超时）、`npm pack --dry-run`，平台是 ubuntu 和 windows、Node 18/20/22 六个组合——`engines` 说 >= 18，代码里也有 Windows 专属分支（ssh-agent 的命名管道、路径大小写折叠），只跑一个组合等于没测。改完 `magpie plugin update magpie-ssh`（Git 装法）才会生效到正在跑的 magpie。
 
 ## 📄 许可
 
