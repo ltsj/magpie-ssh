@@ -2,6 +2,17 @@
 
 版本号跟着 npm 包走，`0.x` 期间小版本之间可能有行为变化，破坏性改动会写在这里。
 
+## 未发布
+
+### 新增
+
+- `test/e2e-run.mjs`：进程内起一个 ssh2 exec 服务端（命令按名字回放，不是真 shell），用真的 SSH 连接把 `run` 那条路跑一遍——退出码透出、stdout/stderr 各自保序且 stderr 就地标记、超过 4MB 只丢内容、`maxChars` 截断、超时、取消、被信号杀死、没拿到退出码就断线、两台主机的批量汇总、`reach` 指纹、连接复用与超时后作废，以及走 `index.mjs` 工具层的一次 `run` 和审计落盘。60 秒看门狗兜底，`HOME` / `USERPROFILE` / `XDG_CONFIG_HOME` 全指到临时目录。
+- CI 多跑一步 `node test/e2e-run.mjs`（3 分钟超时），`package.json` 加 `test:e2e-run`，`test:all` 改成三套一起。
+
+### 文档
+
+- 更正 stdout / stderr 的说明：两路各自保序、彼此按到达顺序拼，但同一瞬间写的内容到达顺序不保证（SSH 把它们放在两个流里），不是「可能被远端合并成一段」。
+
 ## 0.9.0
 
 ### 新增

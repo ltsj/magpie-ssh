@@ -124,7 +124,7 @@ magpie 给每个工具 55 秒，插件自己留出余量：
 
 - 输出超过 4MB 只丢弃后续内容并在退出码那行下面注明，**命令继续跑**，不会被杀。
 - 文本默认再截到 16000 字符（`maxChars`，上限 200000），截断不会切出半个 emoji。
-- `stdout` 和 `stderr` 按到达顺序拼在一起，`stderr` 在它出现的位置标 `[stderr]`。同一瞬间写出的两路可能被远端合并成一段，隔开写的就分得清。
+- `stdout` 和 `stderr` 各自保序，两路之间按到达顺序拼；`stderr` 在它到达的位置标 `[stderr]`。两路在同一瞬间写的内容到达顺序不保证（SSH 把它们放在两个流里），隔开写的就分得清。
 - 调用被取消（宿主掐断）回 `exit -1（调用被取消，连接已断开）`，和超时、成功三者互不冒充。
 - 命令被信号杀死（`kill`、OOM）或连接在拿到退出码之前断了，也是 `exit -1`，并在 `[stderr]` 里写明原因——不会冒充 `exit 0`。
 - 没有这台主机、缺参数、连不上、认证失败、指纹对不上，全部变成 `exit -1` 加一句原因，不抛异常（magpie 加载插件时会拿空参数探一次每个工具，抛异常会把整个插件标成失败）。
@@ -190,7 +190,7 @@ magpie 给每个工具 55 秒，插件自己留出余量：
 - **验证码过不去** — keyboard-interactive 只用密码回答，OTP / 二次确认的服务器连不上。
 - **`put` / `get` 不续传、不保属性** — 断在中途只能整段重来（已传完的文件会再传一遍），权限、属主、mtime 不保留；符号链接和特殊文件只跳过不复制。
 - **页面不能测连接、不能生成密钥** — 沙箱里没有网络，也不读 `~/.ssh`。
-- **e2e 只覆盖 put/get** — `run` 要真 shell 才测得出来，进程内服务端顶不了，那部分靠人工和 `check`。
+- **e2e 的 shell 是回放的** — 进程内 exec 服务端按命令名给固定输出，测的是客户端这条链路，不是真 shell 的怪异行为（信号、编码、超长行）。真机上的 `run` 仍建议先用 `check` 确认连通性。
 
 ---
 
@@ -218,8 +218,9 @@ magpie 给每个工具 55 秒，插件自己留出余量：
 │   └── icon.svg
 ├── test/
 │   ├── smoke.mjs                 # 纯逻辑测试
-│   └── e2e.mjs                   # 真连接测试：进程内 SFTP 服务端 + put/get 全流程
-├── .github/workflows/ci.yml      # CI：ubuntu/windows × node 18/20/22，跑两套测试 + npm pack --dry-run
+│   ├── e2e.mjs                   # 真连接：进程内 SFTP 服务端 + put/get 全流程
+│   └── e2e-run.mjs               # 真连接：进程内 exec 服务端 + run/批量/超时/复用
+├── .github/workflows/ci.yml      # CI：ubuntu/windows × node 18/20/22，跑三套测试 + npm pack --dry-run
 ├── .gitattributes                # 统一 LF：检出时不换成 CRLF
 ├── package.json                  # 插件清单 + magpie.page 元数据
 ├── pnpm-workspace.yaml           # 禁用 ssh2 / cpu-features 的构建脚本（有纯 JS 回退）
@@ -234,15 +235,18 @@ magpie 给每个工具 55 秒，插件自己留出余量：
 ```bash
 pnpm install
 node test/smoke.mjs        # 纯逻辑，或者 pnpm test
-node test/e2e.mjs          # 真连接，或者 pnpm run test:e2e
-node test/smoke.mjs && node test/e2e.mjs   # 两个一起，pnpm run test:all
+node test/e2e.mjs          # 真连接：put/get，或者 pnpm run test:e2e
+node test/e2e-run.mjs      # 真连接：run，或者 pnpm run test:e2e-run
+pnpm run test:all          # 三套一起
 ```
 
 `test/smoke.mjs` 只测纯逻辑：读 `plugins.json` 的各种兜底与坏文件报错、连接配置与认证优先级（含私钥口令、keyboard-interactive）、`~/.ssh/config` 的别名/通配/排除与跳板机写法、`known_hosts` 指纹判断、`host` 多选解析、输出截断与 stdout/stderr 顺序、审计开关与轮转、连接放回与「不连坐」、本机路径护栏（含递归时的逐文件检查）、本机/远端目录遍历（符号链接与特殊文件跳过）、工具在坏参数和空配置下回文本而不抛。
 
-`test/e2e.mjs` 起一个**进程内**的 ssh2 SFTP 服务端（映射到临时目录），用真的 SSH 连接把 `put` / `get` 跑一遍：单文件往返、嵌套目录与空目录、符号链接跳过、传上层目录时私钥不被带走、时间预算用尽时给部分结果且回 `exit -1`、本机/远端路径不存在时是文本报错。不需要真主机、不需要凭据，60 秒看门狗兜底，CI 里跑得动。
+`test/e2e.mjs` 起一个**进程内**的 ssh2 SFTP 服务端（映射到临时目录），用真的 SSH 连接把 `put` / `get` 跑一遍：单文件往返、嵌套目录与空目录、符号链接跳过、传上层目录时私钥不被带走、时间预算用尽时给部分结果且回 `exit -1`、本机/远端路径不存在时是文本报错。
 
-两边都不碰真的家目录：`test/e2e.mjs` 把 `HOME`、`USERPROFILE`、`XDG_CONFIG_HOME` 全指到临时目录，`known_hosts` 和 `plugins.json` 都是假的。
+`test/e2e-run.mjs` 起一个**进程内**的 exec 服务端（命令按名字回放，不是真 shell），把 `run` 那条路跑一遍：退出码透出、stdout/stderr 各自保序且 stderr 就地标记、超过 4MB 只丢内容、`maxChars` 截断、超时、取消、被信号杀死、没拿到退出码就断线、两台主机的批量汇总、`reach` 的指纹、连接复用与超时后作废，以及走 `index.mjs` 工具层的一次 `run` 和审计落盘。
+
+两个 e2e 都不需要真主机、不需要凭据，60 秒看门狗兜底，CI 里跑得动；它们都把 `HOME`、`USERPROFILE`、`XDG_CONFIG_HOME` 全指到临时目录，`known_hosts`、`plugins.json`、审计日志都是假的。
 
 改代码时注意三条硬约束：
 
@@ -250,7 +254,7 @@ node test/smoke.mjs && node test/e2e.mjs   # 两个一起，pnpm run test:all
 - 工具的 `execute` 不许抛异常：坏参数一律回文本。
 - 工具名是 `<插件短名>_<工具名>`，文件夹装的插件用文件夹名当短名。
 
-CI 在 push 到 `master` 和 PR 时跑：`pnpm install --frozen-lockfile`、`node test/smoke.mjs`、`node test/e2e.mjs`（3 分钟超时）、`npm pack --dry-run`，平台是 ubuntu 和 windows、Node 18/20/22 六个组合——`engines` 说 >= 18，代码里也有 Windows 专属分支（ssh-agent 的命名管道、路径大小写折叠），只跑一个组合等于没测。改完 `magpie plugin update magpie-ssh`（Git 装法）才会生效到正在跑的 magpie。
+CI 在 push 到 `master` 和 PR 时跑：`pnpm install --frozen-lockfile`、`node test/smoke.mjs`、`node test/e2e.mjs`、`node test/e2e-run.mjs`（各 3 分钟超时）、`npm pack --dry-run`，平台是 ubuntu 和 windows、Node 18/20/22 六个组合——`engines` 说 >= 18，代码里也有 Windows 专属分支（ssh-agent 的命名管道、路径大小写折叠），只跑一个组合等于没测。改完 `magpie plugin update magpie-ssh`（Git 装法）才会生效到正在跑的 magpie。
 
 ## 📄 许可
 
