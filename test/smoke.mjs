@@ -451,7 +451,11 @@ assert.match(
 );
 
 // 递归传目录时逐个路径再查一遍：上层目录合法也不能把 ~/.ssh 带出去
-assert.equal(insideGuardDirs(join(home, ".SSH", "id_ed25519")), true);
+// 大小写折叠只在 macOS / Windows 上做：Linux 上 .SSH 是另一个目录，不该被拦
+assert.equal(
+	insideGuardDirs(join(home, ".SSH", "id_ed25519")),
+	process.platform !== "linux",
+);
 assert.equal(insideGuardDirs(join(home, ".ssh", "nested", "x")), true);
 assert.equal(insideGuardDirs(join(configDir(), "plugins.json")), true);
 assert.equal(insideGuardDirs(join(tmpdir(), "elsewhere", "a.txt")), false);
